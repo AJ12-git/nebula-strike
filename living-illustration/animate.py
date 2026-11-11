@@ -22,6 +22,9 @@ OUT = ROOT / "out"
 OUT.mkdir(exist_ok=True)
 SRC = np.asarray(Image.open(ROOT / "source.jpg").convert("RGB")).astype(np.float32)
 SH, SW = SRC.shape[:2]                     # 2576 x 1288
+# two layers: a static background plate and the figure (alpha = figure mask); see mask.py
+MASK = np.asarray(Image.open(ROOT / "out" / "figure_mask.png")).astype(np.float32)[..., None] / 255.0
+PLATE = np.asarray(Image.open(ROOT / "out" / "background.png").convert("RGB")).astype(np.float32)
 OW, OH = 1080, 2160                        # output (same 1:2 aspect)
 K = SW / OW                                # output px -> source px
 FPS, LOOP = 24, 12.0
@@ -129,6 +132,7 @@ def closed_eye_overlay():
 
 
 BLINK = closed_eye_overlay()
+BG_OUT = sample(PLATE, GX, GY)                                # the background never moves
 BLINK_A = BLINK[..., 3:4] / 255.0
 BLINK_RGB = BLINK[..., :3]
 BLINK_TIMES = [2.3, 6.9, 7.25, 10.6]                          # includes a double blink
@@ -232,7 +236,9 @@ def frame(t):
     if c > 0:
         a = BLINK_A * min(1.0, c * 1.6)
         src = SRC * (1 - a) + BLINK_RGB * a
-    out = sample(src, x, y)
+    fg = sample(src, x, y)
+    a = sample(MASK, x, y)
+    out = fg * a + BG_OUT * (1 - a)
     return overlay(np.clip(out, 0, 255).astype(np.uint8), t)
 
 
