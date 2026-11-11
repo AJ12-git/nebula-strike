@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cheese Heist</title>
+<style>
+  @font-face { font-family: "Patrick Hand"; src: url("./node_modules/@fontsource/patrick-hand/files/patrick-hand-latin-400-normal.woff2") format("woff2"); }
+  html, body { margin: 0; background: #000; overflow: hidden; }
+  #wrap { width: 1280px; height: 720px; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1280" height="720"></canvas></div>
+<script type="module">
+import rough from './node_modules/roughjs/bundled/rough.esm.js';
+
+const W = 1280, H = 720, DURATION = 30, BOIL_FPS = 12;
+const WORLD_W = 2600, FLOOR = 640, TABLE_Y = 380, CORNER = 170;
+const INK = '#2b2118';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const rc = rough.canvas(cv);
+
+// ---------------- helpers ----------------
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (a, b, x) => { const u = clamp((x - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); };
+const easeOut = u => 1 - (1 - u) * (1 - u), easeIn = u => u * u;
+const seg = (a, b, t) => clamp((t - a) / (b - a), 0, 1);
+function track(keys, t) {
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 0; i < keys.length - 1; i++) {
+    const [a, va] = keys[i], [b, vb, e] = keys[i + 1];
+    if (t <= b) { let u = (t - a) / (b - a); if (e === 'out') u = easeOut(u); else if (e === 'in') u = easeIn(u); else if (e === 's') u = u * u * (3 - 2 * u); return lerp(va, vb, u); }
+  }
+  return keys[keys.length - 1][1];
+}
+const arc = (x0, y0, x1, y1, peak, u) => [lerp(x0, x1, u), lerp(y0, y1, u) - 4 * (Math.min(y0, y1) - peak) * u * (1 - u)];
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// rough options: the seed changes BOIL_FPS times a second so outlines "boil" like hand-drawn cels
+let boil = 0, sc = 0;
+const O = (o = {}) => ({ seed: boil * 997 + (++sc) * 13 + 1, roughness: 1.1, bowing: 1.2, stroke: INK, strokeWidth: 2.4, ...o });
+// watercolour fill slightly mis-registered from the ink line
+let FILL_OFF = [2, -1.5];
+function washPath(path, color, alpha = 0.92) {
+  ctx.save(); ctx.translate(FILL_OFF[0], FILL_OFF[1]); ctx.globalAlpha *= alpha; ctx.fillStyle = color; ctx.fill(path); ctx.restore();
+}
+function ellipsePath(cx, cy, w, h) { const p = new Path2D(); p.ellipse(cx, cy, Math.abs(w) / 2, Math.abs(h) / 2, 0, 0, Math.PI * 2); return p; }
+function E(cx, cy, w, h, fill, o = {}) { if (fill) washPath(ellipsePath(cx, cy, w, h), fill, o.alpha ?? 0.92); if (o.stroke !== 'none') rc.ellipse(cx, cy, w, h, O(o)); }
+function P(d, fill, o = {}) { if (fill) washPath(new Path2D(d), fill, o.alpha ?? 0.92); if (o.stroke !== 'none') rc.path(d, O(o)); }
+function Ln(x1, y1, x2, y2, o = {}) { rc.line(x1, y1, x2, y2, O(o)); }
+function Cv(pts, o = {}) { rc.curve(pts, O(o)); }
+function poly(pts) { return 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L') + ' Z'; }
+function hatch(cx, cy, w, h, color, o = {}) { rc.ellipse(cx, cy, w, h, O({ stroke: 'none', fill: color, fillStyle: 'hachure', hachureGap: 5, fillWeight: 1.1, hachureAngle: -50, ...o })); }
+// a tapered "ribbon" along a centreline (tails, limbs)
+function ribbon(pts, w0, w1) {
+  const n = pts.length, L = [], R = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+    let dx = b[0] - a[0], dy = b[1] - a[1]; const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+    const w = lerp(w0, w1, i / (n - 1)) / 2;
+    L.push([pts[i][0] - dy * w, pts[i][1] + dx * w]); R.push([pts[i][0] + dy * w, pts[i][1] - dx * w]);
+  }
+  return poly(L.concat(R.reverse()));
+}
+function bez(p0, p1, p2, n = 8) { const o = []; for (let i = 0; i <= n; i++) { const u = i / n; o.push([(1 - u) * (1 - u) * p0[0] + 2 * (1 - u) * u * p1[0] + u * u * p2[0], (1 - u) * (1 - u) * p0[1] + 2 * (1 - u) * u * p1[1] + u * u * p2[1]]); } return o; }
+function text(str, x, y, size, color = INK, font = '"Patrick Hand"', rot = 0, align = 'center') {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.font = `${size}px ${font}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.lineWidth = size * 0.12; ctx.strokeStyle = '#fffaf0'; ctx.lineJoin = 'round'; ctx.strokeText(str, 0, 0);
+  ctx.fillStyle = color; ctx.fillText(str, 0, 0); ctx.restore();
+}
+
+// ---------------- paper texture ----------------
+const paper = document.createElement('canvas'); paper.width = W; paper.height = H;
+{
+  const g = paper.getContext('2d'), id = g.createImageData(W, H), r = mulberry32(7);
+  for (let i = 0; i < W * H; i++) { const v = 236 + r() * 19; id.data[i * 4] = v; id.data[i * 4 + 1] = v - 3; id.data[i * 4 + 2] = v - 12; id.data[i * 4 + 3] = 255; }
+  g.putImageData(id, 0, 0);
+  g.globalAlpha = 0.05; g.strokeStyle = '#7a6040';
+  for (let i = 0; i < 900; i++) { const x = r() * W, y = r() * H, a = r() * 6.28, l = 4 + r() * 14; g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); }
+  g.globalAlpha = 1;
+  const vg = g.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.95);
+  vg.addColorStop(0, 'rgba(255,255,255,0)'); vg.addColorStop(1, 'rgba(120,90,60,0.55)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+}
+
+// ---------------- static background (painted once) ----------------
+const BG_Y0 = -420, BG_H = 1500;
+const bg = document.createElement('canvas'); bg.width = WORLD_W; bg.height = BG_H;
+{
+  const real = { ctx, rc };
+  const g = bg.getContext('2d'); const brc = rough.canvas(bg);
+  // temporarily redirect the drawing helpers to the background canvas
+  const saveCtx = ctx;
+  const draw = (fn) => { g.save(); g.translate(0, -BG_Y0); fn(g, brc); g.restore(); };
+  const r = mulberry32(42);
+  const BO = (o = {}) => ({ seed: Math.floor(r() * 1e6), roughness: 1.3, bowing: 1.3, stroke: INK, strokeWidth: 2, ...o });
+  const wash = (g, path, color, a = 0.9, off = [3, -2]) => { g.save(); g.translate(off[0], off[1]); g.globalAlpha = a; g.fillStyle = color; g.fill(path); g.restore(); };
+  draw((g, brc) => {
+    // back wall wash with blotches
+    g.fillStyle = '#f1dfbf'; g.fillRect(CORNER, BG_Y0, WORLD_W, 610 - BG_Y0);
+    for (let i = 0; i < 260; i++) { g.globalAlpha = 0.05; g.fillStyle = r() < 0.5 ? '#e7c99a' : '#f8ecd4'; g.beginPath(); g.arc(CORNER + r() * WORLD_W, BG_Y0 + r() * (610 - BG_Y0), 30 + r() * 90, 0, 7); g.fill(); }
+    g.globalAlpha = 1;
+    // wallpaper: faded little flowers
+    for (let y = -380; y < 560; y += 70) for (let x = CORNER + 30 + ((y / 70) % 2) * 35; x < WORLD_W; x += 70) {
+      g.globalAlpha = 0.35; g.fillStyle = '#d9a37a'; for (let k = 0; k < 4; k++) { g.beginPath(); g.arc(x + Math.cos(k * 1.57) * 5, y + Math.sin(k * 1.57) * 5, 4, 0, 7); g.fill(); }
+      g.fillStyle = '#b9c78a'; g.beginPath(); g.arc(x, y, 2.5, 0, 7); g.fill();
+    }
+    g.globalAlpha = 1;
+    // left side wall in perspective (the mouse hole lives here)
+    const side = new Path2D(poly([[0, BG_Y0], [CORNER, BG_Y0 + 60], [CORNER, 612], [0, 700]]));
+    wash(g, side, '#dcc39c', 1, [0, 0]);
+    for (let i = 0; i < 60; i++) { g.globalAlpha = 0.06; g.fillStyle = '#c4a173'; g.beginPath(); g.arc(r() * CORNER, BG_Y0 + r() * 1000, 20 + r() * 50, 0, 7); g.fill(); }
+    g.globalAlpha = 1;
+    brc.line(CORNER, BG_Y0, CORNER, 612, BO({ strokeWidth: 2.4 }));
+    // side baseboard
+    const sbb = new Path2D(poly([[0, 662], [CORNER, 584], [CORNER, 612], [0, 700]])); wash(g, sbb, '#8e6241', 1, [0, 0]); brc.path(poly([[0, 662], [CORNER, 584], [CORNER, 612], [0, 700]]), BO());
+    // mouse hole (arch on the side wall)
+    const hole = 'M 110 650 L 110 616 Q 112 572 136 566 Q 158 562 162 600 L 162 618 Z';
+    wash(g, new Path2D(hole), '#1e140e', 1, [0, 0]); brc.path(hole, BO({ strokeWidth: 2.6 }));
+    // back baseboard + floor
+    wash(g, new Path2D(poly([[CORNER, 584], [WORLD_W, 584], [WORLD_W, 612], [CORNER, 612]])), '#8e6241', 1, [0, 0]);
+    brc.line(CORNER, 584, WORLD_W, 584, BO()); brc.line(CORNER, 612, WORLD_W, 612, BO());
+    const floor = new Path2D(poly([[0, 700], [CORNER, 612], [WORLD_W, 612], [WORLD_W, 1080], [0, 1080]]));
+    wash(g, floor, '#cf9a63', 1, [0, 0]);
+    for (let y = 630; y < 1080; y += 26) brc.line(CORNER - (y - 612) * 2, y, WORLD_W, y, BO({ strokeWidth: 1.2, stroke: '#9b6a3e' }));
+    for (let i = 0; i < 70; i++) { const y = 626 + Math.floor(r() * 8) * 26, x = CORNER + r() * WORLD_W; brc.line(x, y - 13, x, y + 13, BO({ strokeWidth: 1.2, stroke: '#9b6a3e' })); }
+    brc.rectangle(0, 612, WORLD_W, 470, BO({ stroke: 'none', fill: '#8a5a33', fillStyle: 'hachure', hachureGap: 9, fillWeight: 0.8, hachureAngle: 20 }));
+    // window with curtains
+    const wx = 520, wy = 150, ww = 300, wh = 270;
+    wash(g, new Path2D(poly([[wx, wy], [wx + ww, wy], [wx + ww, wy + wh], [wx, wy + wh]])), '#a9d4ec', 1, [0, 0]);
+    for (const [cx, cy, s] of [[600, 220, 1], [740, 260, 0.7]]) { g.fillStyle = '#ffffff'; g.globalAlpha = 0.9; for (let k = 0; k < 4; k++) { g.beginPath(); g.arc(cx + k * 18 * s, cy + (k % 2) * -8 * s, 18 * s, 0, 7); g.fill(); } g.globalAlpha = 1; }
+    brc.rectangle(wx, wy, ww, wh, BO({ strokeWidth: 5, stroke: '#f8f3e8' })); brc.rectangle(wx, wy, ww, wh, BO());
+    brc.line(wx + ww / 2, wy, wx + ww / 2, wy + wh, BO({ strokeWidth: 4, stroke: '#f8f3e8' })); brc.line(wx, wy + wh / 2, wx + ww, wy + wh / 2, BO({ strokeWidth: 4, stroke: '#f8f3e8' }));
+    for (const sx of [-1, 1]) {
+      const x0 = sx < 0 ? wx - 40 : wx + ww + 40, x1 = sx < 0 ? wx + 50 : wx + ww - 50;
+      const cur = `M ${x0} ${wy - 30} L ${x1} ${wy - 30} Q ${x1 - sx * 30} ${wy + 140} ${x1 - sx * 10} ${wy + wh + 40} L ${x0} ${wy + wh + 50} Z`;
+      wash(g, new Path2D(cur), '#d65a4a', 0.95); brc.path(cur, BO({ stroke: 'none', fill: '#a83c30', fillStyle: 'hachure', hachureGap: 12, hachureAngle: 80, fillWeight: 1 })); brc.path(cur, BO());
+    }
+    brc.line(wx - 60, wy - 32, wx + ww + 60, wy - 32, BO({ strokeWidth: 5 }));
+    // shelf with books + clock
+    wash(g, new Path2D(poly([[1080, 250], [1320, 250], [1320, 262], [1080, 262]])), '#8e6241', 1); brc.rectangle(1080, 250, 240, 12, BO());
+    const books = [['#4f7cac', 22, 70], ['#d9a441', 18, 58], ['#8a4d76', 26, 76], ['#5f9e6e', 16, 62], ['#c4553f', 20, 68]];
+    let bx = 1095; for (const [c, w, h] of books) { wash(g, new Path2D(poly([[bx, 250 - h], [bx + w, 250 - h], [bx + w, 250], [bx, 250]])), c, 1); brc.rectangle(bx, 250 - h, w, h, BO({ strokeWidth: 1.8 })); bx += w + 3; }
+    wash(g, ellipsePath(1250, 210, 56, 56), '#f8f3e8', 1); brc.circle(1250, 210, 56, BO()); brc.line(1250, 210, 1250, 190, BO()); brc.line(1250, 210, 1264, 216, BO());
+    // kitchen table
+    const legs = [[1520, 1545], [1855, 1880]];
+    for (const [a, b] of legs) { wash(g, new Path2D(poly([[a, 395], [b, 395], [b - 3, 642], [a + 3, 642]])), '#9c6b42', 1); brc.path(poly([[a, 395], [b, 395], [b - 3, 642], [a + 3, 642]]), BO()); }
+    const top = poly([[1490, 380], [1910, 380], [1910, 400], [1490, 400]]);
+    wash(g, new Path2D(top), '#b47c4c', 1); brc.path(top, BO());
+    brc.line(1495, 641, 1560, 641, BO({ strokeWidth: 3, stroke: 'rgba(60,40,20,0.35)' })); brc.line(1840, 641, 1905, 641, BO({ strokeWidth: 3, stroke: 'rgba(60,40,20,0.35)' }));
+    // floor lamp
+    brc.line(2140, 640, 2140, 300, BO({ strokeWidth: 3 }));
+    const shade = poly([[2100, 300], [2180, 300], [2165, 240], [2115, 240]]); wash(g, new Path2D(shade), '#f2c86b', 1); brc.path(shade, BO());
+    wash(g, ellipsePath(2140, 642, 60, 12), '#5a4636', 1); brc.ellipse(2140, 642, 60, 12, BO());
+    // rug & basket shadows painted on the floor
+    g.globalAlpha = 0.18; g.fillStyle = '#4a2c14'; g.beginPath(); g.ellipse(945, 640, 125, 14, 0, 0, 7); g.fill(); g.globalAlpha = 1;
+  });
+}
+
+// ---------------- characters ----------------
+const MOUSE = { fur: '#b9b3ab', dark: '#8f8880', belly: '#ece6dc', ear: '#f2a7b5', nose: '#e8708a', scarf: '#d8433a' };
+const CAT = { fur: '#ef9a46', dark: '#c26a2a', stripe: '#a5521f', cream: '#fbe7c9', nose: '#e8708a', iris: '#9ccc5a' };
+
+function eye(x, y, w, h, kind, look = [0, 0], iris = null) {
+  if (kind === 'closed') { Cv([[x - w / 2, y], [x, y + h * 0.25], [x + w / 2, y]], { strokeWidth: 2.4 }); return; }
+  if (kind === 'happy') { Cv([[x - w / 2, y + 2], [x, y - h * 0.3], [x + w / 2, y + 2]], { strokeWidth: 2.4 }); return; }
+  if (kind === 'spiral') { const pts = []; for (let a = 0; a < 12; a += 0.6) pts.push([x + Math.cos(a + boil) * a * w / 26, y + Math.sin(a + boil) * a * h / 26]); Cv(pts, { strokeWidth: 1.8 }); return; }
+  if (kind === 'x') { Ln(x - w / 3, y - h / 3, x + w / 3, y + h / 3, { strokeWidth: 2.6 }); Ln(x + w / 3, y - h / 3, x - w / 3, y + h / 3, { strokeWidth: 2.6 }); return; }
+  const s = kind === 'wide' ? 1.25 : kind === 'half' ? 1 : 1;
+  E(x, y, w * s, h * s, '#ffffff', { strokeWidth: 2 });
+  if (iris) E(x + look[0] * w * 0.2, y + look[1] * h * 0.2, w * 0.62, h * 0.58, iris, { stroke: 'none' });
+  const pr = kind === 'wide' ? 0.28 : 0.42;
+  E(x + look[0] * w * 0.22, y + look[1] * h * 0.22, w * pr, h * pr * 1.1, INK, { stroke: 'none', alpha: 1 });
+  E(x + look[0] * w * 0.22 - w * 0.08, y + look[1] * h * 0.22 - h * 0.12, w * 0.14, w * 0.14, '#ffffff', { stroke: 'none', alpha: 1 });
+  if (kind === 'half') { washPath(new Path2D(`M ${x - w * 0.6} ${y - h * 0.6} L ${x + w * 0.6} ${y - h * 0.6} L ${x + w * 0.6} ${y - h * 0.05} L ${x - w * 0.6} ${y - h * 0.05} Z`), iris ? CAT.fur : MOUSE.fur, 1); Ln(x - w / 2, y - h * 0.05, x + w / 2, y - h * 0.05); }
+}
+function cheesePath(x, y, s, bite = 0) {
+  // wedge with the point to the right; bite eats from the point
+  const tip = lerp(x + 46 * s, x + 14 * s, bite);
+  return poly([[x - 24 * s, y - 12 * s], [tip, y + 4 * s], [x - 24 * s, y + 16 * s]]);
+}
+function drawCheese(x, y, s, bite = 0) {
+  P(cheesePath(x, y, s, bite), '#f6c844', { strokeWidth: 2 });
+  P(poly([[x - 24 * s, y - 12 * s], [x - 30 * s, y - 6 * s], [x - 30 * s, y + 20 * s], [x - 24 * s, y + 16 * s]]), '#e0a92a', { strokeWidth: 2 });
+  for (const [hx, hy, hr] of [[-12, 0, 6], [0, 7, 4], [-17, 9, 3.5]]) if (x + hx * s < lerp(x + 46 * s, x + 14 * s, bite) - 6 * s) E(x + hx * s, y + hy * s, hr * s, hr * s * 0.8, '#d39a1e', { strokeWidth: 1.4 });
+}
+
+// ---- mouse (local coords: feet at 0,0, facing +x) ----
+function drawMouse(m, t) {
+  if (!m.visible) return;
+  ctx.save(); ctx.translate(m.x, m.y); ctx.rotate(m.rot || 0); ctx.scale((m.face || 1) * (m.sx || 1) * 1.3, (m.sy || 1) * 1.3);
+  FILL_OFF = [2, -1.5];
+  const ph = m.ph || 0, pose = m.pose, P2 = Math.PI * 2;
+  const bob = pose === 'tiptoe' ? -Math.abs(Math.sin(ph * P2)) * 5 : pose === 'run' ? -Math.abs(Math.sin(ph * P2 * 2)) * 4 : 0;
+  ctx.translate(0, bob);
+  // limb targets
+  let fA = [-6, 0], fB = [7, 0], hA = [16, -34], hB = [-8, -30], lean = 0;
+  if (pose === 'tiptoe') {
+    const a = ph * P2; fA = [-2 + Math.cos(a) * 11, -Math.max(0, Math.sin(a)) * 18]; fB = [4 + Math.cos(a + Math.PI) * 11, -Math.max(0, Math.sin(a + Math.PI)) * 18];
+    hA = [22, -50 + Math.sin(a) * 3]; hB = [14, -52 - Math.sin(a) * 3]; lean = -0.08;
+  } else if (pose === 'freeze') { fA = [-4, 0]; fB = [14, -16]; hA = [22, -56]; hB = [12, -60]; lean = -0.12; }
+  else if (pose === 'run') { lean = 0.22; hA = [24, -36 + Math.sin(ph * P2 * 2) * 6]; hB = [-12, -34 - Math.sin(ph * P2 * 2) * 6]; }
+  else if (pose === 'climb') { const a = ph * P2; hA = [14, -64 + Math.sin(a) * 8]; hB = [12, -58 - Math.sin(a) * 8]; fA = [10, -4 + Math.sin(a) * 6]; fB = [8, -8 - Math.sin(a) * 6]; }
+  else if (pose === 'jump') { fA = [-16, -6]; fB = [-8, -12]; hA = [14, -70]; hB = [6, -72]; lean = 0.1; }
+  else if (pose === 'lift') { hA = [10, -86]; hB = [-2, -84]; }
+  else if (pose === 'skid') { fA = [16, 0]; fB = [26, -2]; hA = [-14, -52]; hB = [-22, -46]; lean = -0.3; }
+  else if (pose === 'eat') { hA = [26, -54]; hB = [22, -50]; }
+  else if (pose === 'giggle') { hA = [26, -56]; hB = [20, -40]; }
+  else if (pose === 'wave') { const a = Math.sin(t * 12) * 8; hA = [20 + a, -84]; hB = [-10, -30]; }
+  else if (pose === 'peek') { lean = -0.1; hA = [18, -40]; hB = [10, -36]; }
+  ctx.rotate(lean);
+  // tail
+  const tw = Math.sin(t * 5) * 6;
+  Cv([[-12, -18], [-30, -10], [-44, -22 + tw], [-58, -14 - tw], [-66, -24 + tw * 0.5]], { strokeWidth: 2.6 });
+  // back leg & arm
+  const leg = (f, back) => { Cv([[back ? -4 : 4, -20], [(f[0] + (back ? -4 : 4)) / 2 + 3, (f[1] - 20) / 2], [f[0], f[1] - 4]], { strokeWidth: 3, stroke: back ? '#5a4c40' : INK }); E(f[0] + 4, f[1] - 3, 15, 7, back ? MOUSE.dark : MOUSE.fur, { strokeWidth: 2 }); };
+  const arm = (h, back) => { Cv([[2, -42], [(2 + h[0]) / 2, (h[1] - 42) / 2 + 4], [h[0], h[1]]], { strokeWidth: 2.6, stroke: back ? '#5a4c40' : INK }); E(h[0], h[1], 8, 8, back ? MOUSE.dark : MOUSE.fur, { strokeWidth: 1.8 }); };
+  if (pose === 'run') {
+    // cartoon "wheel" legs
+    for (let k = 0; k < 3; k++) rc.ellipse(4, -9, 34, 20, O({ strokeWidth: 1.4, roughness: 2.5, stroke: k ? '#7a6a5a' : INK }));
+    leg([-8 + Math.cos(ph * 12) * 8, -2], true);
+  } else leg(fB, true);
+  arm(hB, true);
+  // body
+  E(0, -30, 32, 40, MOUSE.fur);
+  E(6, -27, 18, 26, MOUSE.belly, { stroke: 'none' });
+  hatch(-6, -22, 22, 22, MOUSE.dark);
+  if (pose !== 'run') leg(fA, false); else leg([12 + Math.sin(ph * 12) * 8, -3], false);
+  // scarf
+  const sw = Math.sin(t * 9) * (pose === 'run' ? 6 : 2);
+  P(`M -10 -46 Q 4 -40 16 -46 L 16 -40 Q 4 -34 -10 -40 Z`, MOUSE.scarf, { strokeWidth: 2 });
+  P(`M -8 -42 L ${-24} ${-40 + sw} L ${-22} ${-33 + sw} L -6 -38 Z`, MOUSE.scarf, { strokeWidth: 2 });
+  // head
+  const hx = 8, hy = -60;
+  E(hx - 12, hy - 18, 24, 24, MOUSE.dark); E(hx - 12, hy - 18, 14, 14, MOUSE.ear, { stroke: 'none' });
+  E(hx, hy, 36, 34, MOUSE.fur);
+  E(hx + 6, hy - 22, 26, 26, MOUSE.fur); E(hx + 6, hy - 22, 16, 16, MOUSE.ear, { stroke: 'none' });
+  E(hx + 15, hy + 4, 24, 15, MOUSE.belly);
+  const nt = m.sniff ? Math.sin(t * 40) * 1.5 : 0;
+  E(hx + 27 + nt, hy + 2, 8, 7, MOUSE.nose, { strokeWidth: 1.8 });
+  for (const [dx, dy] of [[14, -4], [16, 0], [14, 4]]) Ln(hx + 22, hy + 6, hx + 22 + dx, hy + 6 + dy, { strokeWidth: 1.2 });
+  const look = m.look || [0.4, 0];
+  const ek = m.eyes || 'open';
+  if (ek === 'wink') { eye(hx + 5, hy - 5, 8, 11, 'open', look); eye(hx + 13, hy - 5, 7, 10, 'happy'); }
+  else { eye(hx + 5, hy - 5, 8, 11, ek, look); eye(hx + 13, hy - 5, 7, 10, ek, look); }
+  const mo = m.mouth || 'smile';
+  if (mo === 'smile') Cv([[hx + 12, hy + 9], [hx + 18, hy + 12], [hx + 23, hy + 8]], { strokeWidth: 1.8 });
+  else if (mo === 'grin') { P(`M ${hx + 9} ${hy + 8} Q ${hx + 17} ${hy + 18} ${hx + 25} ${hy + 7} Z`, '#7a2a2a', { strokeWidth: 1.8 }); Ln(hx + 13, hy + 9, hx + 22, hy + 9, { stroke: '#fff', strokeWidth: 2 }); }
+  else if (mo === 'o') E(hx + 18, hy + 11, 6, 7, '#7a2a2a', { strokeWidth: 1.6 });
+  else if (mo === 'chew') { const c = Math.abs(Math.sin(t * 16)); E(hx + 18, hy + 10, 8, 2 + c * 5, '#7a2a2a', { strokeWidth: 1.6 }); }
+  // cheese held in front
+  if (m.cheese) {
+    const [cx, cy, s] = pose === 'lift' ? [4, -100, 0.75] : pose === 'run' || pose === 'jump' || pose === 'skid' ? [6, -96, 0.6] : pose === 'eat' || pose === 'giggle' ? [32, -50, 0.5] : [24, -40, 0.5];
+    drawCheese(cx, cy, s, m.bite || 0);
+  }
+  arm(hA, false);
+  if (m.sweat) { const k = (t * 2) % 1; E(hx - 18 - k * 10, hy - 22 + k * 14, 6, 9, '#8ccbf0', { strokeWidth: 1.4 }); }
+  ctx.restore();
+}
+
+// ---- cat (local coords: feet at 0,0, facing +x) ----
+const catHead = { x: 0, y: 0, ok: false };
+function catFace(hx, hy, c, t) {
+  // ears
+  const tw = c.earTwitch ? Math.sin(t * 40) * 0.25 : 0;
+  ctx.save(); ctx.translate(hx - 26, hy - 30); ctx.rotate(-0.15 + tw);
+  P(poly([[-18, 8], [-6, -40], [16, 0]]), CAT.fur); P(poly([[-10, 2], [-4, -26], [8, -2]]), '#f2a7b5', { stroke: 'none' });
+  ctx.restore();
+  P(poly([[hx + 14, hy - 40], [hx + 40, hy - 74], [hx + 48, hy - 30]]), CAT.fur); P(poly([[hx + 22, hy - 42], [hx + 38, hy - 62], [hx + 42, hy - 36]]), '#f2a7b5', { stroke: 'none' });
+  // head
+  E(hx, hy, 104, 92, CAT.fur);
+  for (const dx of [-14, -2, 10]) Cv([[hx + dx, hy - 44], [hx + dx + 2, hy - 34], [hx + dx - 1, hy - 26]], { strokeWidth: 3, stroke: CAT.stripe });
+  Cv([[hx - 50, hy - 4], [hx - 38, hy - 2]], { strokeWidth: 3, stroke: CAT.stripe }); Cv([[hx - 50, hy + 8], [hx - 40, hy + 8]], { strokeWidth: 3, stroke: CAT.stripe });
+  E(hx + 28, hy + 18, 56, 36, CAT.cream);
+  P(poly([[hx + 42, hy + 2], [hx + 56, hy + 2], [hx + 49, hy + 10]]), CAT.nose, { strokeWidth: 1.8 });
+  for (const [dx, dy] of [[30, -8], [34, 0], [30, 8]]) Ln(hx + 50, hy + 16, hx + 50 + dx, hy + 16 + dy, { strokeWidth: 1.3 });
+  for (const [dx, dy] of [[-26, -8], [-28, 2]]) Ln(hx + 16, hy + 18, hx + 16 + dx, hy + 18 + dy, { strokeWidth: 1.3 });
+  // eyes
+  const look = c.look || [0.5, 0], ek = c.eyes || 'open';
+  if (ek === 'oneopen') { eye(hx + 10, hy - 14, 26, 32, 'closed'); eye(hx + 38, hy - 12, 22, 28, 'open', look, CAT.iris); }
+  else if (ek === 'squash') { eye(hx + 10, hy - 14, 12, 34, 'x'); eye(hx + 38, hy - 12, 10, 30, 'x'); }
+  else { eye(hx + 10, hy - 14, 26, 32, ek, look, CAT.iris); eye(hx + 38, hy - 12, 22, 28, ek, look, CAT.iris); }
+  if (c.brows === 'angry') { Ln(hx - 2, hy - 38, hx + 20, hy - 28, { strokeWidth: 3.2 }); Ln(hx + 30, hy - 28, hx + 50, hy - 36, { strokeWidth: 3.2 }); }
+  // mouth
+  const mo = c.mouth || 'none';
+  if (mo === 'smile') Cv([[hx + 36, hy + 22], [hx + 46, hy + 28], [hx + 56, hy + 20]], { strokeWidth: 1.8 });
+  else if (mo === 'o') E(hx + 46, hy + 26, 14, 16, '#7a2a2a', { strokeWidth: 1.8 });
+  else if (mo === 'grr') { P(`M ${hx + 30} ${hy + 22} L ${hx + 62} ${hy + 20} L ${hx + 58} ${hy + 32} L ${hx + 34} ${hy + 33} Z`, '#ffffff', { strokeWidth: 1.8 }); Ln(hx + 32, hy + 27, hx + 60, hy + 26, { strokeWidth: 1.4 }); }
+  else if (mo === 'tongue') { Cv([[hx + 34, hy + 24], [hx + 46, hy + 28], [hx + 58, hy + 22]], { strokeWidth: 1.8 }); P(`M ${hx + 44} ${hy + 27} Q ${hx + 44} ${hy + 44} ${hx + 50} ${hy + 42} Q ${hx + 54} ${hy + 40} ${hx + 52} ${hy + 26} Z`, '#f08aa0', { strokeWidth: 1.6 }); }
+  else if (mo === 'snore') { const k = 6 + Math.sin(t * 3) * 3; E(hx + 46, hy + 26, k, k * 0.8, '#7a2a2a', { strokeWidth: 1.6 }); }
+  catHead.x = hx; catHead.y = hy; catHead.m = ctx.getTransform(); catHead.ok = true;
+}
+function drawCat(c, t) {
+  if (!c.visible) return;
+  ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.rot || 0); ctx.scale((c.face || 1) * (c.sx || 1), c.sy || 1);
+  FILL_OFF = [3, -2];
+  const pose = c.pose, ph = c.ph || 0, P2 = Math.PI * 2;
+  if (pose === 'sleep' || pose === 'wake') {
+    const br = 1 + Math.sin(t * 2.2) * 0.03;
+    // curled loaf with tail wrapped around the front
+    E(-10, -32 * br, 170, 70 * br, CAT.fur);
+    for (const dx of [-60, -36, -12]) Cv([[dx, -64 * br], [dx + 6, -48 * br], [dx + 2, -36 * br]], { strokeWidth: 3, stroke: CAT.stripe });
+    hatch(-20, -18, 120, 30, CAT.dark);
+    P(ribbon([[-90, -16], [-60, -2], [0, 2], [50, -4], [72, -18]], 22, 12), CAT.fur);
+    E(60, -16, 34, 18, CAT.cream);
+    ctx.save(); ctx.translate(48 + (c.stir || 0) * 6, (pose === 'wake' ? -52 : -40) + (c.stir || 0) * -4); ctx.scale(0.82, 0.82);
+    catFace(0, 0, c, t);
+    ctx.restore();
+    ctx.restore(); return;
+  }
+  // standing / action poses
+  let lean = 0, fA = [-14, 0], fB = [18, 0], hA = [44, -104], hB = [-24, -100];
+  if (pose === 'crouch') { lean = 0.25; fA = [-26, 0]; fB = [26, 0]; hA = [52, -40]; hB = [40, -36]; }
+  else if (pose === 'leap') { lean = 0.15; fA = [-70, -50]; fB = [-58, -66]; hA = [96, -130]; hB = [84, -140]; }
+  else if (pose === 'land') { fA = [-30, 0]; fB = [30, 0]; hA = [56, -60]; hB = [-40, -60]; }
+  else if (pose === 'look') { const s = Math.sin(t * 6); hA = [40, -70]; hB = [-30, -70]; c.look = [s, 0]; }
+  else if (pose === 'angry') { hA = [46, -90]; hB = [-36, -84]; }
+  else if (pose === 'run') { lean = 0.32; const a = ph * P2; hA = [50 + Math.cos(a) * 26, -110 + Math.sin(a) * 18]; hB = [10 - Math.cos(a) * 26, -110 - Math.sin(a) * 18]; }
+  else if (pose === 'skid') { lean = -0.42; fA = [34, 0]; fB = [54, -6]; hA = [-50, -170]; hB = [-70, -150]; }
+  else if (pose === 'flat') { hA = [60, -90]; hB = [60, -150]; fA = [30, 0]; fB = [20, -10]; }
+  else if (pose === 'lying') { hA = [-30, -60]; hB = [30, -40]; fA = [-40, -20]; fB = [30, -10]; }
+  ctx.rotate(lean);
+  // tail
+  const tw = Math.sin(t * 4 + 1) * 10;
+  const tailPts = pose === 'run' ? bez([-34, -60], [-100, -70 + tw], [-140, -40 - tw]) : pose === 'leap' ? bez([-34, -60], [-110, -80], [-150, -50 + tw]) : bez([-34, -56], [-96, -60], [-80, -150 + tw]);
+  P(ribbon(tailPts, 18, 14), CAT.fur);
+  for (let k = 2; k < tailPts.length - 1; k += 2) { const p = tailPts[k]; Ln(p[0] - 5, p[1] - 6, p[0] + 3, p[1] + 6, { strokeWidth: 3, stroke: CAT.stripe }); }
+  const leg = (f, back) => { P(ribbon(bez([back ? -14 : 12, -60], [(f[0] + (back ? -14 : 12)) / 2 + 8, (f[1] - 60) / 2], [f[0], f[1] - 8]), 22, 16), back ? CAT.dark : CAT.fur); E(f[0] + 10, f[1] - 6, 36, 16, back ? CAT.dark : CAT.cream); };
+  const arm = (h, back) => { P(ribbon(bez([10, -118], [(10 + h[0]) / 2, (h[1] - 118) / 2 + 12], h), 18, 14), back ? CAT.dark : CAT.fur); E(h[0], h[1], 20, 18, back ? CAT.dark : CAT.cream, { strokeWidth: 2 }); };
+  if (pose === 'run') {
+    for (let k = 0; k < 3; k++) rc.ellipse(10, -26, 120, 54, O({ strokeWidth: 1.6, roughness: 2.6, stroke: k ? '#8a6a4a' : INK }));
+    leg([-10 + Math.cos(ph * 14) * 30, -6], true);
+  } else leg(fB, true);
+  arm(hB, true);
+  E(0, -88, 92, 112, CAT.fur);
+  E(16, -82, 50, 76, CAT.cream, { stroke: 'none' });
+  for (const dy of [-120, -96, -72]) Cv([[-44, dy], [-30, dy + 4], [-22, dy + 14]], { strokeWidth: 3, stroke: CAT.stripe });
+  hatch(-14, -62, 70, 60, CAT.dark);
+  if (pose === 'run') leg([30 + Math.sin(ph * 14) * 30, -4], false); else leg(fA, false);
+  catFace(16, -168, c, t);
+  if (c.frameOn) drawFrame(16, -150, 0.12, true);
+  arm(hA, false);
+  ctx.restore();
+}
+
+// picture frame (a painted fish, naturally)
+function drawFrame(x, y, rot, broken = false) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  if (!broken) {
+    E(0, 0, 100, 74, '#bfe0ee', { strokeWidth: 1.8 });
+    P('M -28 4 Q -4 -18 22 2 Q -4 20 -28 4 Z M 22 2 L 36 -10 L 34 14 Z', '#f08c4a', { strokeWidth: 2 });
+    E(-16, -1, 5, 5, INK, { stroke: 'none', alpha: 1 });
+  } else {
+    // torn canvas: only ragged scraps left in the corners so the face shows through
+    for (const [x, y, sx, sy] of [[-62, -46, 1, 1], [62, -46, -1, 1], [62, 46, -1, -1], [-62, 46, 1, -1]]) P(poly([[x, y], [x + sx * 24, y], [x + sx * 8, y + sy * 8], [x, y + sy * 20]]), '#bfe0ee', { strokeWidth: 1.4 });
+  }
+  const fr = poly([[-70, -54], [70, -54], [70, 54], [-70, 54]]);
+  rc.rectangle(-70, -54, 140, 108, O({ strokeWidth: 9, stroke: '#a0703a', roughness: 0.8 }));
+  rc.path(fr, O({ strokeWidth: 2 })); rc.rectangle(-62, -46, 124, 92, O({ strokeWidth: 1.6 }));
+  ctx.restore();
+}
+
+// ---------------- the story ----------------
+const HOLE_X = 136, HOLE_Y = 640;
+function mouseAt(t) {
+  const m = { x: 160, y: FLOOR, face: 1, pose: 'stand', ph: 0, rot: 0, sx: 1, sy: 1, look: [0.4, 0], eyes: 'open', mouth: 'smile', cheese: false, visible: true };
+  if (t < 0.9) { m.visible = false; return m; }
+  if (t < 3.5) {
+    m.x = track([[0.9, 120], [1.6, 168, 'out']], t); m.pose = t < 1.6 ? 'tiptoe' : 'peek'; m.ph = t * 1.5;
+    if (t > 1.6 && t < 2.1) { m.look = [-0.6, 0]; m.face = -1; m.mouth = 'o'; }
+    else if (t >= 2.1 && t < 2.6) { m.look = [0.7, 0]; m.mouth = 'o'; }
+    else if (t >= 2.6) { m.sniff = true; m.eyes = t < 3.0 ? 'closed' : 'happy'; m.sy = 1 + 0.05 * Math.sin(t * 20); m.mouth = t > 3.0 ? 'grin' : 'smile'; }
+    return m;
+  }
+  if (t < 9.0) {
+    m.x = track([[3.5, 168], [6.0, 870], [6.8, 870], [9.0, 1500]], t);
+    if (t >= 6.0 && t < 6.8) { m.pose = 'freeze'; m.eyes = 'wide'; m.look = [-0.4, 0.3]; m.mouth = 'o'; m.sweat = true; m.sx = 1 + Math.sin(t * 60) * 0.02; }
+    else { m.pose = 'tiptoe'; m.ph = m.x / 70; m.mouth = 'grin'; m.look = [0.6, -0.2]; }
+    return m;
+  }
+  if (t < 10.6) { const u = seg(9.0, 10.6, t); m.x = 1508; m.y = lerp(FLOOR, TABLE_Y + 30, u); m.pose = 'climb'; m.ph = u * 4; m.look = [0.2, -0.8]; m.mouth = 'o'; return m; }
+  if (t < 11.0) { const u = seg(10.6, 11.0, t); [m.x, m.y] = arc(1508, TABLE_Y + 30, 1570, TABLE_Y, TABLE_Y - 30, u); m.pose = 'jump'; return m; }
+  if (t < 11.9) { m.x = track([[11.0, 1570], [11.9, 1712]], t); m.y = TABLE_Y; m.pose = 'tiptoe'; m.ph = m.x / 60; m.mouth = 'grin'; return m; }
+  if (t < 13.3) {
+    m.x = 1712; m.y = TABLE_Y - (t > 12.3 && t < 12.65 ? Math.sin(seg(12.3, 12.65, t) * Math.PI) * 26 : 0);
+    m.pose = 'lift'; m.cheese = true; m.eyes = 'happy'; m.mouth = 'grin'; return m;
+  }
+  if (t < 13.55) { m.x = 1712; m.y = TABLE_Y - Math.sin(seg(13.3, 13.55, t) * Math.PI) * 22; m.pose = 'freeze'; m.cheese = true; m.eyes = 'wide'; m.look = [-0.8, 0]; m.mouth = 'o'; m.sx = 0.9; m.sy = 1.15; return m; }
+  if (t < 14.05) { const u = seg(13.55, 14.05, t); [m.x, m.y] = arc(1712, TABLE_Y, 1965, FLOOR, TABLE_Y - 60, u); m.pose = 'jump'; m.cheese = true; m.eyes = 'wide'; m.mouth = 'o'; return m; }
+  if (t < 15.5) { m.x = track([[14.05, 1965], [15.5, 2310]], t); m.pose = 'run'; m.ph = t * 3; m.cheese = true; m.mouth = 'o'; m.eyes = 'wide'; m.look = [-0.6, 0]; return m; }
+  if (t < 15.75) { m.x = track([[15.5, 2310], [15.75, 2338, 'out']], t); m.pose = 'skid'; m.cheese = true; m.eyes = 'wide'; m.mouth = 'o'; return m; }
+  if (t < 20.9) { m.face = -1; m.x = track([[15.75, 2338], [20.9, 150]], t); m.pose = 'run'; m.ph = t * 3; m.cheese = true; m.mouth = 'grin'; m.look = [0.8, 0]; return m; }
+  if (t < 21.02) { m.face = -1; m.x = track([[20.9, 150], [21.02, 118]], t); m.pose = 'jump'; m.sx = 1.5; m.sy = 0.6; m.cheese = true; return m; }
+  if (t < 23.8) { m.visible = false; return m; }
+  if (t < 24.3) { m.x = track([[23.8, 118], [24.3, 165, 'out']], t); m.pose = 'tiptoe'; m.ph = t * 2; m.cheese = true; m.bite = 0.2; m.mouth = 'grin'; return m; }
+  if (t < 26.4) {
+    m.x = 165; m.cheese = true; m.bite = lerp(0.2, 0.85, seg(24.4, 26.2, t));
+    if (t > 25.3 && t < 26.1) { m.pose = 'giggle'; m.eyes = 'happy'; m.mouth = 'grin'; m.sy = 1 + Math.abs(Math.sin(t * 18)) * 0.05; }
+    else { m.pose = 'eat'; m.mouth = 'chew'; m.eyes = 'happy'; }
+    return m;
+  }
+  m.x = 165; m.pose = 'wave'; m.mouth = 'grin'; m.eyes = t > 26.8 && t < 27.4 ? 'wink' : 'open'; m.look = [0, 0.1]; m.cheese = false;
+  return m;
+}
+function catAt(t) {
+  const c = { x: 945, y: 618, face: 1, pose: 'sleep', ph: 0, rot: 0, sx: 1, sy: 1, look: [0.5, 0], eyes: 'closed', mouth: 'snore', visible: true };
+  if (t < 12.6) { if (t > 6.1 && t < 6.9) { c.stir = Math.sin(seg(6.1, 6.9, t) * Math.PI); c.mouth = 'smile'; } return c; }
+  if (t < 13.15) {
+    c.earTwitch = t < 12.85; c.mouth = 'none';
+    c.eyes = t < 12.8 ? 'closed' : t < 13.0 ? 'oneopen' : 'wide'; c.look = [0.9, -0.1]; c.pose = t < 13.0 ? 'sleep' : 'wake'; return c;
+  }
+  if (t < 13.45) { c.pose = 'crouch'; c.x = 950; c.y = 620; c.eyes = 'open'; c.brows = 'angry'; c.mouth = 'grr'; c.sx = 1.12; c.sy = 0.8; c.look = [0.9, -0.3]; return c; }
+  if (t < 14.2) { const u = seg(13.45, 14.2, t); [c.x, c.y] = arc(950, 620, 1735, TABLE_Y, 200, u); c.pose = 'leap'; c.rot = lerp(-0.35, 0.3, u); c.sx = 1.15; c.sy = 0.9; c.eyes = 'wide'; c.mouth = 'grr'; c.brows = 'angry'; return c; }
+  if (t < 14.45) { c.x = 1735; c.y = TABLE_Y; c.pose = 'land'; const u = seg(14.2, 14.45, t); c.sy = lerp(0.65, 1, easeOut(u)); c.sx = lerp(1.3, 1, easeOut(u)); c.eyes = 'x'; c.mouth = 'o'; return c; }
+  if (t < 14.95) { c.x = 1735; c.y = TABLE_Y; c.pose = t < 14.75 ? 'look' : 'angry'; c.eyes = 'open'; if (t >= 14.75) { c.look = [0.9, 0.6]; c.brows = 'angry'; c.mouth = 'grr'; } return c; }
+  if (t < 15.35) { const u = seg(14.95, 15.35, t); [c.x, c.y] = arc(1735, TABLE_Y, 1930, FLOOR, TABLE_Y - 40, u); c.pose = 'leap'; c.rot = lerp(-0.2, 0.4, u); c.eyes = 'open'; c.brows = 'angry'; c.mouth = 'grr'; c.look = [0.6, 0.6]; return c; }
+  c.y = FLOOR;
+  if (t < 15.95) { c.x = track([[15.35, 1930], [15.95, 2240]], t); c.pose = 'run'; c.ph = t * 2.5; c.brows = 'angry'; c.mouth = 'grr'; c.eyes = 'open'; c.look = [0.8, 0.4]; return c; }
+  if (t < 16.6) { c.x = track([[15.95, 2240], [16.6, 2330, 'out']], t); c.pose = 'skid'; c.eyes = 'wide'; c.look = [-0.9, 0.5]; c.mouth = 'o'; return c; }
+  if (t < 16.85) { c.x = 2330; c.pose = 'angry'; c.face = t < 16.72 ? 1 : -1; c.sx = 1 - 0.6 * Math.sin(seg(16.6, 16.85, t) * Math.PI); c.eyes = 'open'; c.brows = 'angry'; c.mouth = 'grr'; return c; }
+  c.face = -1;
+  if (t < 18.45) { c.x = track([[16.85, 2330], [18.45, 1420]], t); c.pose = 'run'; c.ph = t * 2.5; c.brows = 'angry'; c.mouth = 'grr'; c.eyes = 'open'; c.look = [0.9, 0.3]; return c; }
+  if (t < 19.05) { const u = seg(18.45, 19.05, t); c.x = lerp(1420, 1290, u); c.y = FLOOR - Math.sin(u * Math.PI) * 70; c.rot = lerp(0, Math.PI / 2, easeOut(u)); c.pose = 'skid'; c.eyes = 'wide'; c.mouth = 'o'; return c; }
+  if (t < 19.45) { c.x = 1290; c.y = FLOOR - 30; c.rot = Math.PI / 2; c.pose = 'lying'; c.eyes = 'spiral'; c.mouth = 'o'; return c; }
+  if (t < 19.65) { const u = seg(19.45, 19.65, t); c.x = 1290; c.y = FLOOR - 30 * (1 - u); c.rot = lerp(Math.PI / 2, 0, u); c.pose = 'angry'; c.eyes = 'open'; c.brows = 'angry'; c.mouth = 'grr'; return c; }
+  if (t < 21.1) { c.x = track([[19.65, 1290], [21.1, 212]], t); c.pose = 'run'; c.ph = t * 3; c.brows = 'angry'; c.mouth = 'grr'; c.eyes = 'open'; c.look = [0.9, 0.3]; return c; }
+  c.x = 212;
+  if (t < 22.6) { c.pose = 'flat'; const u = seg(21.1, 21.3, t); c.sx = lerp(0.35, 0.5, u); c.sy = 1.08; c.eyes = 'squash'; c.mouth = 'o'; c.frameOn = t > 22.35; return c; }
+  c.frameOn = true;
+  if (t < 23.6) { const u = easeIn(seg(22.6, 23.6, t)); c.pose = 'flat'; c.sx = lerp(0.5, 1, u); c.rot = u * Math.PI / 2; c.y = FLOOR - u * 34; c.eyes = 'squash'; c.mouth = 'o'; return c; }
+  const b = t < 23.85 ? Math.sin(seg(23.6, 23.85, t) * Math.PI) * 10 : 0;
+  c.pose = 'lying'; c.rot = Math.PI / 2; c.y = FLOOR - 34 - b; c.eyes = 'spiral'; c.mouth = 'tongue';
+  return c;
+}
+
+// props
+function drawBasket(front) {
+  const x = 945, y = 628;
+  if (!front) { E(x, y - 16, 240, 56, '#a8743e'); E(x - 6, y - 22, 200, 36, '#5b86b8'); return; }
+  const p = `M ${x - 122} ${y - 20} Q ${x - 120} ${y + 14} ${x - 90} ${y + 16} L ${x + 90} ${y + 16} Q ${x + 120} ${y + 14} ${x + 122} ${y - 20} Q ${x} ${y + 2} ${x - 122} ${y - 20} Z`;
+  P(p, '#b98146'); rc.path(p, O({ stroke: 'none', fill: '#7a4f22', fillStyle: 'cross-hatch', hachureGap: 9, fillWeight: 1 }));
+}
+function drawRug(t) {
+  const u = smooth(18.45, 18.8, t), x0 = lerp(1030, 1110, u), x1 = lerp(1420, 1330, u);
+  const top = []; const n = 12;
+  for (let i = 0; i <= n; i++) { const x = lerp(x0 + 30, x1 + 30, i / n); top.push([x, 652 - u * Math.max(0, Math.sin(i / n * Math.PI * 3)) * 22]); }
+  const pts = [[x0, 690], ...top.map(p => [p[0] - 30, p[1]]), [x1, 690]];
+  const d = 'M' + pts.map(p => p.join(' ')).join(' L') + ' Z';
+  P(d, '#c7504a'); rc.path(d, O({ stroke: 'none', fill: '#f2d38a', fillStyle: 'zigzag', hachureGap: 14, fillWeight: 1.4 }));
+}
+function drawPlant(t) {
+  const w = t > 16.55 ? Math.sin((t - 16.55) * 16) * 0.22 * Math.exp(-(t - 16.55) * 2.2) : 0;
+  ctx.save(); ctx.translate(2410, 640); ctx.rotate(w);
+  for (const [a, l] of [[-1.9, 120], [-1.6, 150], [-1.3, 125], [-2.2, 90], [-1.0, 95]]) { ctx.save(); ctx.rotate(a + Math.PI / 2); E(0, -l / 2 - 50, 34, l, '#6aa858'); Ln(0, -50, 0, -l - 40, { strokeWidth: 1.4 }); ctx.restore(); }
+  P(poly([[-40, -60], [40, -60], [30, 0], [-30, 0]]), '#c86f43');
+  ctx.restore();
+}
+function drawPlate(t) {
+  if (t < 14.2) { E(1745, 376, 96, 14, '#f4f1ea', { strokeWidth: 2 }); E(1745, 375, 64, 7, null, { strokeWidth: 1.2, stroke: '#7aa7cf' }); if (t < 11.9) drawCheese(1745, 360, 0.75); return; }
+  const r = mulberry32(5), dt = t - 14.2;
+  for (let i = 0; i < 7; i++) {
+    const vx = (r() - 0.5) * 520, vy = -200 - r() * 260, rot0 = r() * 6;
+    let x = 1745 + vx * dt, y = 376 + vy * dt + 900 * dt * dt;
+    const onTable = Math.abs(x - 1700) < 215, ground = onTable && dt < 0.5 ? 382 : FLOOR + 6;
+    if (y > ground) { const tl = (-vy + Math.sqrt(vy * vy + 3600 * (ground - 376))) / 1800; x = 1745 + vx * tl; y = ground; }
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot0 + (y < ground ? dt * 9 : 0));
+    P(poly([[-12, -4], [12, -6], [4, 7]]), '#f4f1ea', { strokeWidth: 1.6 }); ctx.restore();
+  }
+}
+function frameState(t) {
+  if (t < 21.1) return { x: 222, y: 330, rot: 0 };
+  if (t < 22.0) { const k = (t - 21.1); return { x: 222, y: 330, rot: Math.sin(k * 14) * 0.12 * (1 + k * 2) }; }
+  if (t < 22.35) { const u = easeIn(seg(22.0, 22.35, t)); return { x: lerp(222, 205, u), y: lerp(330, 450, u), rot: lerp(0.3, 0.1, u) }; }
+  return null;
+}
+
+// ---------------- effects ----------------
+function puff(x, y, s, age, life = 0.6) {
+  if (age < 0 || age > life) return; const u = age / life;
+  ctx.save(); ctx.globalAlpha = 1 - u;
+  for (let k = 0; k < 4; k++) { const a = k * 1.7 + x; E(x + Math.cos(a) * s * (0.4 + u), y - Math.abs(Math.sin(a)) * s * 0.5 * (0.4 + u) - u * 10, s * (0.6 + u * 0.8), s * (0.5 + u * 0.7), '#efe4d0', { strokeWidth: 1.6 }); }
+  ctx.restore();
+}
+function speedLines(x, y, dir, h) { for (let k = 0; k < 4; k++) { const yy = y - k * h / 4 - 8, l = 40 + (k * 37 % 30); Ln(x - dir * 20, yy, x - dir * (20 + l), yy, { strokeWidth: 1.6, roughness: 0.6 }); } }
+function bang(x, y, str, size, t0, t, rot = 0) {
+  const a = t - t0; if (a < 0 || a > 0.9) return;
+  const s = a < 0.1 ? a / 0.1 * 1.2 : 1.2 - 0.2 * Math.min(1, (a - 0.1) / 0.1);
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.rotate(rot);
+  const pts = []; for (let i = 0; i < 24; i++) { const r = (i % 2 ? 0.55 : 1) * size; pts.push([Math.cos(i / 24 * 6.283) * r * 1.4, Math.sin(i / 24 * 6.283) * r]); }
+  P(poly(pts), '#ffd84a', { strokeWidth: 2.6 });
+  text(str, 0, 2, size * 0.75, '#c8282a');
+  ctx.restore();
+}
+function exclaim(x, y, t0, t, ch = '!') { const a = t - t0; if (a < 0 || a > 0.55) return; const s = a < 0.08 ? a / 0.08 : 1; text(ch, x, y - s * 10, 64 * s, '#d8332a'); }
+function stars(cx, cy, rx, ry, t, n = 4) {
+  for (let i = 0; i < n; i++) {
+    const a = t * 4 + i / n * 6.283, x = cx + Math.cos(a) * rx, y = cy + Math.sin(a) * ry, s = 12;
+    const pts = []; for (let k = 0; k < 10; k++) { const r = k % 2 ? s * 0.45 : s; pts.push([x + Math.cos(k * 0.628 - 1.57) * r, y + Math.sin(k * 0.628 - 1.57) * r]); }
+    P(poly(pts), '#ffd84a', { strokeWidth: 1.6 });
+  }
+}
+function sparkle(x, y, s) { Ln(x - s, y, x + s, y, { strokeWidth: 2, stroke: '#f2b51c' }); Ln(x, y - s, x, y + s, { strokeWidth: 2, stroke: '#f2b51c' }); }
+function thought(x, y, a) {
+  if (a < 0) return; const s = Math.min(1, a / 0.2);
+  E(x - 18, y + 46, 8 * s, 8 * s, '#ffffff', { strokeWidth: 1.6 }); E(x - 8, y + 30, 14 * s, 14 * s, '#ffffff', { strokeWidth: 1.6 });
+  E(x + 20, y - 10, 110 * s, 80 * s, '#ffffff', { strokeWidth: 2 });
+  if (s >= 1) { drawCheese(x + 14, y - 10, 0.75); sparkle(x + 50, y - 34, 6 + Math.sin(a * 20) * 2); }
+}
+
+// ---------------- camera ----------------
+function camTarget(t) {
+  if (t < 3.5) return [330, 530, 2.1];
+  if (t < 9.0) return [mouseAt(t).x + 90, 520, 1.6];
+  if (t < 12.45) return [1640, 420, 1.55];
+  if (t < 14.5) return [1340, 450, 0.9];
+  if (t < 21.1) { const m = mouseAt(t), c = catAt(t); return [(m.x + c.x) / 2, 480, 1.1]; }
+  if (t < 23.8) return [400, 470, 1.45];
+  return [380, 520, 1.7];
+}
+function camera(t) {
+  // temporal smoothing within a shot keeps the follow-cam from jerking on direction changes
+  const cuts = [3.5, 9.0, 12.45, 14.5, 21.1, 23.8, 99];
+  const s0 = cuts.findIndex(c => t < c), lo = s0 > 0 ? cuts[s0 - 1] : 0, hi = cuts[s0];
+  let x = 0, y = 0, z = 0, n = 0;
+  for (let k = -8; k <= 8; k++) { const tt = clamp(t + k * 0.06, lo, hi - 1e-3); const [a, b, c] = camTarget(tt); x += a; y += b; z += c; n++; }
+  x /= n; y /= n; z /= n;
+  const hw = W / 2 / z; x = clamp(x, hw, WORLD_W - hw);
+  // impacts shake the camera
+  let sh = 0; for (const [t0, a] of [[14.2, 9], [15.35, 4], [19.05, 6], [21.1, 16], [22.35, 5], [23.6, 9]]) { const d = t - t0; if (d > 0 && d < 0.5) sh += a * Math.exp(-d * 9); }
+  return [x + Math.sin(t * 91) * sh, y + Math.cos(t * 77) * sh, z];
+}
+
+// ---------------- frame ----------------
+window.renderAt = (t) => {
+  boil = Math.floor(t * BOIL_FPS); sc = 0;
+  const [cx, cy, z] = camera(t);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(paper, 0, 0);
+  ctx.setTransform(z, 0, 0, z, W / 2 - cx * z, H / 2 - cy * z);
+  ctx.drawImage(bg, 0, BG_Y0);
+  const m = mouseAt(t), c = catAt(t);
+  // eyes glowing in the hole
+  if (t < 0.9) { const bl = (t > 0.45 && t < 0.55) ? 0.15 : 1; E(130, 612, 8, 11 * bl, '#ffffff', { strokeWidth: 1.4 }); E(144, 611, 8, 11 * bl, '#ffffff', { strokeWidth: 1.4 }); if (bl === 1) { E(132, 613, 4, 5, INK, { stroke: 'none', alpha: 1 }); E(146, 612, 4, 5, INK, { stroke: 'none', alpha: 1 }); } }
+  const fs = frameState(t); if (fs) drawFrame(fs.x, fs.y, fs.rot);
+  if (t < 21.1) Ln(222, 270, 222, 278, { strokeWidth: 3 }); else Ln(222, 270, 226, 280, { strokeWidth: 3 });
+  drawRug(t); drawPlant(t);
+  drawBasket(false);
+  if (c.pose === 'sleep' || c.pose === 'wake' || (t < 13.45)) { drawCat(c, t); drawBasket(true); drawPlate(t); drawMouse(m, t); }
+  else { drawBasket(true); drawPlate(t); drawCat(c, t); drawMouse(m, t); }
+  // floor dust while running
+  const runPuffs = (who, from, to) => { for (let tt = Math.floor(from / 0.12) * 0.12; tt < Math.min(t, to); tt += 0.12) { const p = who(tt); puff(p.x - (p.face || 1) * 20, p.y, 14, t - tt, 0.45); } };
+  if (t > 14.05 && t < 21.5) runPuffs(mouseAt, 14.1, 20.9);
+  if (t > 15.35 && t < 21.6) { runPuffs(catAt, 15.4, 15.95); runPuffs(catAt, 16.9, 18.45); runPuffs(catAt, 19.7, 21.1); }
+  if (t > 15.95 && t < 17.2) for (let tt = 15.95; tt < Math.min(t, 16.6); tt += 0.06) { const p = catAt(tt); puff(p.x + 50, FLOOR, 22, t - tt, 0.7); }
+  for (const [t0, x, y, s] of [[14.2, 1735, TABLE_Y, 30], [15.35, 1930, FLOOR, 26], [18.5, 1400, FLOOR, 30], [19.05, 1290, FLOOR, 34], [21.0, 140, FLOOR - 10, 22], [21.1, 200, FLOOR - 60, 40], [23.6, 330, FLOOR, 40]]) puff(x, y, s, t - t0, 0.8);
+  if (m.visible && m.pose === 'run') speedLines(m.x, m.y - 10, m.face, 50);
+  if (c.visible && c.pose === 'run') speedLines(c.x, c.y - 30, c.face, 150);
+  // sleepy Zzz
+  if (t < 12.7) for (let k = 0; k < 3; k++) { const a = ((t + k * 0.95) % 2.85) / 2.85; ctx.save(); ctx.globalAlpha = Math.sin(a * Math.PI); text('z', 1010 + a * 40 + Math.sin(a * 9) * 8, 540 - a * 110, 24 + a * 22, '#4a6aa0', '"Patrick Hand"', -0.2); ctx.restore(); }
+  thought(220, 470, t > 2.75 && t < 3.55 ? t - 2.75 : -1);
+  if (t > 11.9 && t < 13.3) for (let k = 0; k < 3; k++) { const a = t * 3 + k * 2.1; sparkle(1716 + Math.cos(a) * 34, TABLE_Y - 96 + Math.sin(a * 1.3) * 20, 5 + 3 * Math.abs(Math.sin(a * 2))); }
+  exclaim(890, 560, 6.0, t); exclaim(990, 480, 13.0, t); exclaim(1716, 280, 13.3, t); exclaim(1790, 160, 14.45, t, '?'); exclaim(1800, 150, 14.75, t); exclaim(2300, 420, 15.95, t, '?!');
+  if ((t > 14.75 && t < 15.1) || (t > 19.45 && t < 19.9)) { const p = catAt(t); for (let k = 0; k < 2; k++) puff(p.x + (k ? 30 : -20) * (p.face || 1), p.y - 250, 12, (t * 3 + k * 0.5) % 0.5, 0.5); }
+  bang(250, 470, 'BONK!', 70, 21.1, t, -0.12);
+  bang(1735, 330, 'CRASH!', 54, 14.2, t, 0.1);
+  if (t > 21.15 && catHead.ok) {
+    ctx.save(); const sm = catHead.m; const pt = new DOMPoint(catHead.x, catHead.y - 40).matrixTransform(sm);
+    ctx.setTransform(z, 0, 0, z, W / 2 - cx * z, H / 2 - cy * z); const inv = ctx.getTransform().inverse(); const wp = pt.matrixTransform(inv);
+    stars(wp.x, wp.y - (t > 23.6 ? 10 : 30), 60, 16, t); ctx.restore();
+  }
+  catHead.ok = false;
+  // screen-space finish: paper texture, iris-out, end card
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = 0.55; ctx.drawImage(paper, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  if (t < 0.6) { ctx.fillStyle = `rgba(0,0,0,${1 - t / 0.6})`; ctx.fillRect(0, 0, W, H); }
+  if (t > 27.0) {
+    const mx = (165 - cx) * z + W / 2, my = (FLOOR - 60 - cy) * z + H / 2;
+    const r = lerp(900, 0, easeIn(seg(27.0, 28.0, t)));
+    ctx.fillStyle = '#0b0806'; ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.arc(mx, my, Math.max(0.1, r), 0, Math.PI * 2, true); ctx.fill('evenodd');
+    if (r > 1) rc.circle(mx, my, r * 2, O({ strokeWidth: 3, stroke: '#2b2118' }));
+  }
+  if (t > 28.0) {
+    const a = smooth(28.1, 28.7, t);
+    ctx.save(); ctx.globalAlpha = a;
+    ctx.fillStyle = '#f6ecd8'; ctx.font = '120px "Patrick Hand"'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.translate(W / 2, H / 2 - 30); ctx.rotate(-0.04 + Math.sin(boil) * 0.004); ctx.fillText('The End', 0, 0);
+    ctx.font = '40px "WenQuanYi Zen Hei"'; ctx.fillStyle = '#f2c84b'; ctx.fillText('— 起司大作戰 —', 0, 92);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+  if (t > 29.4) { ctx.fillStyle = `rgba(0,0,0,${seg(29.4, 30, t)})`; ctx.fillRect(0, 0, W, H); }
+};
+window.DURATION = DURATION;
+window.getEvents = () => ({ duration: DURATION });
+await document.fonts.load('40px "Patrick Hand"');
+window.renderAt(0);
+window.ready = true;
+</script>
+</body>
+</html>

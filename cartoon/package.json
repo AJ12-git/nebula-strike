@@ -1,0 +1,9 @@
+{
+  "name": "cheese-heist-cartoon",
+  "private": true,
+  "description": "Hand-drawn style cat-and-mouse cartoon (Rough.js + Playwright + ffmpeg)",
+  "dependencies": {
+    "roughjs": "4.6.6",
+    "@fontsource/patrick-hand": "5.0.8"
+  }
+}
