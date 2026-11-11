@@ -10,10 +10,11 @@ from pathlib import Path
 import numpy as np
 
 SR = 44100
-DUR = 16.0
-N = int(SR * DUR)
 OUT = Path(__file__).parent / "out"
 ev = json.loads((OUT / "events.json").read_text())
+DUR = float(ev["duration"])
+N = int(SR * DUR)
+WO = ev["whiteout"]
 rng = np.random.default_rng(1111)
 L = np.zeros(N)
 Rch = np.zeros(N)
@@ -53,7 +54,7 @@ def smoothstep(a, b, x):
 
 
 # --- ambient drone + space wind (fades under the white-out, returns softly) ---
-env = smoothstep(0, 2.5, t_all) * (0.7 + 0.5 * smoothstep(4, 10.5, t_all)) * (1 - 0.85 * smoothstep(11.1, 11.4, t_all))
+env = smoothstep(0, 2.5, t_all) * (0.7 + 0.5 * smoothstep(4, ev["hit"], t_all)) * (1 - 0.85 * smoothstep(WO - 0.05, WO + 0.25, t_all))
 drone = sum(a * np.sin(2 * np.pi * f * t_all + p) for f, a, p in [(41.2, 1, 0), (41.6, 0.7, 1), (55, 0.6, 2), (82.4, 0.35, 0.5), (110.3, 0.15, 3)])
 drone *= 1 + 0.25 * np.sin(2 * np.pi * 0.23 * t_all)
 wind = lp(rng.standard_normal(N), 380) * 3
@@ -61,24 +62,27 @@ add(drone * env * 0.11, 0)
 L += wind * env * 0.05 * (1 + 0.3 * np.sin(t_all * 0.7))
 Rch += wind[::-1] * env * 0.05 * (1 + 0.3 * np.cos(t_all * 0.6))
 
-# --- war drums from the dogfight cut to the big hit ---
-for k, tt in enumerate(np.arange(4.0, 11.1, 0.5)):
+# --- war drums from the first fight to the big hit (double time during the dogfight) ---
+d0, d1 = ev["drums"]
+for k, tt in enumerate(np.arange(d0, d1 + 0.01, 0.25)):
+    if k % 2 and not (9.0 <= tt < 19.0):
+        continue
     s, t = sweep(70, 38, 0.6, shape=1.2)
-    hit = s * np.exp(-t * 7) * (0.5 + 0.5 * (k % 2 == 0))
-    add(hit, tt, 0.35 * (0.6 + 0.4 * (tt - 4) / 7))
+    hit = s * np.exp(-t * 7) * (1.0 if k % 4 == 0 else 0.6 if k % 2 == 0 else 0.35)
+    add(hit, tt, 0.35 * (0.6 + 0.4 * (tt - d0) / (d1 - d0)))
 
-# --- flyby whoosh with a left-to-right pan ---
-fb = ev["flyby"]
+# --- flyby whooshes with a left-to-right pan ---
 n = int(1.6 * SR)
-t = np.arange(n) / SR - 0.9
-w = bp(rng.standard_normal(n), 250, 3200) * np.exp(-(t / 0.32) ** 2) * 2.2
-pan = np.tanh(t * 4)
-i0 = int((fb - 0.9) * SR)
-L[i0:i0 + n] += w * np.sqrt((1 - pan) / 2) * 0.22
-Rch[i0:i0 + n] += w * np.sqrt((1 + pan) / 2) * 0.22
-eng, _ = sweep(180, 90, 1.6, shape=1.5)
-L[i0:i0 + n] += eng * np.exp(-(t / 0.35) ** 2) * 0.06
-Rch[i0:i0 + n] += eng * np.exp(-(t / 0.35) ** 2) * 0.06
+for j, fb in enumerate(ev["whooshes"]):
+    t = np.arange(n) / SR - 0.9
+    w = bp(rng.standard_normal(n), 250, 3200) * np.exp(-(t / 0.32) ** 2) * 2.2
+    pan = np.tanh(t * 4) * (1 if j % 2 == 0 else -1)
+    i0 = int((fb - 0.9) * SR)
+    L[i0:i0 + n] += w * np.sqrt((1 - pan) / 2) * 0.22
+    Rch[i0:i0 + n] += w * np.sqrt((1 + pan) / 2) * 0.22
+    eng, _ = sweep(180, 90, 1.6, shape=1.5)
+    L[i0:i0 + n] += eng * np.exp(-(t / 0.35) ** 2) * 0.06
+    Rch[i0:i0 + n] += eng * np.exp(-(t / 0.35) ** 2) * 0.06
 
 # --- lasers ---
 for l in ev["lasers"]:
@@ -90,8 +94,8 @@ for l in ev["lasers"]:
         add(s * np.exp(-t * 12), l["t"] + 0.08, 0.05, rng.uniform(-0.8, 0.8))
 
 # --- explosions ---
-noise_lo = lp(rng.standard_normal(SR * 6), 260) * 4
-noise_hi = lp(rng.standard_normal(SR * 6), 2400) * 1.2
+noise_lo = lp(rng.standard_normal(SR * 8), 260) * 4
+noise_hi = lp(rng.standard_normal(SR * 8), 2400) * 1.2
 for e in ev["explosions"]:
     s = e["s"]
     dur = min(1.2 + 0.45 * s, 5.5)
@@ -113,7 +117,7 @@ add(bp(rng.standard_normal(int(0.7 * SR)), 400, 5000) * np.exp(-zt * 6), ev["fir
 # --- post-blast ring (tinnitus) during the white-out ---
 n = int(1.4 * SR)
 t = np.arange(n) / SR
-add(np.sin(2 * np.pi * 3520 * t) * np.minimum(1, t * 8) * np.exp(-t * 2.2), 11.25, 0.03)
+add(np.sin(2 * np.pi * 3520 * t) * np.minimum(1, t * 8) * np.exp(-t * 2.2), WO + 0.1, 0.03)
 
 # --- title: impact + sustained chord + shimmer ---
 tt = ev["title"]
@@ -133,7 +137,7 @@ shim = (np.sin(2 * np.pi * 880 * t) + 0.6 * np.sin(2 * np.pi * 1318.5 * t)) * (0
 add(shim * smoothstep(1.0, 2.5, t) * (1 - smoothstep(DUR - tt - 1.0, DUR - tt, t)), tt, 0.012)
 
 # --- master: fade in/out, soft clip, normalize ---
-master = smoothstep(0, 0.4, t_all) * (1 - smoothstep(15.3, 16.0, t_all))
+master = smoothstep(0, 0.4, t_all) * (1 - smoothstep(DUR - 0.7, DUR, t_all))
 st = np.stack([L, Rch], 1) * master[:, None]
 st = np.tanh(st * 1.2)
 st *= 0.89 / np.max(np.abs(st))

@@ -15,7 +15,7 @@
   #title { display: flex; flex-direction: column; align-items: center; justify-content: center; opacity: 0; }
   #title h1 {
     margin: 0; font-family: "Inter Display", "Inter", sans-serif; font-weight: 900;
-    font-size: 96px; color: #eaf6ff; letter-spacing: 0.2em; padding-left: 0.2em;
+    font-size: 96px; white-space: nowrap; color: #eaf6ff; letter-spacing: 0.2em; padding-left: 0.2em;
     text-shadow: 0 0 12px #5fd0ff, 0 0 36px #2a7bff, 0 0 80px #6a2cff;
   }
   #title .line { height: 2px; margin-top: 18px; background: linear-gradient(90deg, transparent, #7fe0ff, transparent); width: 0; }
@@ -48,7 +48,15 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-const W = 1280, H = 720, DURATION = 16;
+const W = 1280, H = 720, DURATION = 27;
+// ---------------- timeline ----------------
+// 0-4    A  fighter bursts out of the nebula
+// 4-9    B  head-on fight with the escort fleet
+// 9-19   D  dogfight alongside the giant mothership (reveal, deck run, loop, reversal)
+// 19-22  C  charged shot into the main engines, escape, chain explosion, white-out
+// 22-27  T  aftermath + title
+const DOG = 9.0, LOOP0 = 15.0, LOOP1 = 17.4, CSHOT = 19.0;
+const CHARGE = 19.6, FIRE = 20.05, HIT = 20.4, FINAL = 21.6, TITLE = 22.9;
 
 // ---------- helpers ----------
 function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
@@ -72,7 +80,7 @@ document.getElementById('wrap').prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x010208);
-const camera = new THREE.PerspectiveCamera(48, W / H, 0.1, 6000);
+const camera = new THREE.PerspectiveCamera(48, W / H, 0.1, 8000);
 
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -103,9 +111,21 @@ const cloudTexes = [0, 1, 2, 3].map(() => canvasTex(256, (g, s) => {
   m.addColorStop(0, 'rgba(0,0,0,1)'); m.addColorStop(0.6, 'rgba(0,0,0,0.6)'); m.addColorStop(1, 'rgba(0,0,0,0)');
   g.fillStyle = m; g.fillRect(0, 0, s, s);
 }));
+// panel texture for the mothership hull
+const panelTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 512; const g = c.getContext('2d');
+  g.fillStyle = '#6a6472'; g.fillRect(0, 0, 512, 512);
+  for (let i = 0; i < 260; i++) {
+    const v = Math.floor(R(70, 125)); g.fillStyle = `rgb(${v},${v - 4},${v + 8})`;
+    g.fillRect(Math.floor(R(0, 32)) * 16, Math.floor(R(0, 32)) * 16, Math.floor(R(1, 6)) * 16, Math.floor(R(1, 4)) * 16);
+  }
+  g.strokeStyle = 'rgba(20,18,26,0.7)'; g.lineWidth = 2;
+  for (let i = 0; i <= 512; i += 64) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 512); g.stroke(); g.beginPath(); g.moveTo(0, i); g.lineTo(512, i); g.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(3, 6); return t;
+})();
 
 // ---------- lights ----------
-scene.add(new THREE.AmbientLight(0x30406a, 0.5));
+scene.add(new THREE.AmbientLight(0x30406a, 0.55));
 const sun = new THREE.DirectionalLight(0xffd6b0, 2.6); sun.position.set(-1, 0.8, 1.2); scene.add(sun);
 const rim = new THREE.DirectionalLight(0x6a8cff, 2.2); rim.position.set(1.2, 0.4, -1.5); scene.add(rim);
 const fillPink = new THREE.DirectionalLight(0xff4fb0, 0.8); fillPink.position.set(0, -1, 0.3); scene.add(fillPink);
@@ -124,16 +144,18 @@ function starLayer(n, size, rMin, rMax) {
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   const p = new THREE.Points(g, new THREE.PointsMaterial({ size, sizeAttenuation: false, vertexColors: true, map: softTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
-  scene.add(p); return p;
+  p.frustumCulled = false; scene.add(p); return p;
 }
-starLayer(5000, 2.2, 2500, 3500);
-starLayer(600, 4.0, 2500, 3500);
-{
-  const n = 2500, pos = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) pos.set([R(-70, 70), R(-45, 45), R(-260, 480)], i * 3);
+starLayer(5000, 2.2, 3500, 4500);
+starLayer(600, 4.0, 3500, 4500);
+function dust(n, x0, x1, y0, y1, z0, z1) {
+  const pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) pos.set([R(x0, x1), R(y0, y1), R(z0, z1)], i * 3);
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   scene.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 0.35, color: 0x8fb4ff, map: softTex, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending })));
 }
+dust(2500, -70, 70, -45, 45, -260, 420);
+dust(3500, -160, 200, -20, 170, 380, 1120);
 
 // ---------- nebula ----------
 function nebula(center, spread, colors, count, sMin, sMax, oMin, oMax) {
@@ -147,7 +169,9 @@ function nebula(center, spread, colors, count, sMin, sMax, oMin, oMax) {
 }
 nebula(V(0, 0, -300), V(200, 110, 120), ['#5a24ff', '#2456ff', '#ff3a9e', '#17c4ff', '#8a2cff'], 170, 90, 260, 0.06, 0.2);
 nebula(V(0, 0, -130), V(45, 28, 50), ['#6a3cff', '#3a7bff', '#ff5ab4'], 30, 25, 70, 0.04, 0.1);
-nebula(V(80, 120, 1000), V(520, 220, 120), ['#ff5a1e', '#ff2a4a', '#b02aff', '#ff8a3a'], 130, 220, 520, 0.05, 0.16);
+nebula(V(100, 150, 1700), V(800, 340, 160), ['#ff5a1e', '#ff2a4a', '#b02aff', '#ff8a3a'], 150, 300, 700, 0.05, 0.16);
+// a second, cooler nebula wall for shots that look back toward -z from above the mothership
+nebula(V(300, 250, 200), V(500, 200, 200), ['#3a2cff', '#ff3a9e', '#17a4ff'], 70, 200, 450, 0.03, 0.09);
 
 // ---------- planet ----------
 {
@@ -159,11 +183,11 @@ nebula(V(80, 120, 1000), V(520, 220, 120), ['#ff5a1e', '#ff2a4a', '#b02aff', '#f
       g.fillRect(0, y, s, 1);
     }
   });
-  const planet = new THREE.Mesh(new THREE.SphereGeometry(200, 64, 48), new THREE.MeshStandardMaterial({ map: tex, roughness: 1, metalness: 0 }));
-  planet.position.set(-620, -260, 1300); planet.rotation.z = 0.35;
+  const planet = new THREE.Mesh(new THREE.SphereGeometry(300, 64, 48), new THREE.MeshStandardMaterial({ map: tex, roughness: 1, metalness: 0 }));
+  planet.position.set(-950, -380, 2100); planet.rotation.z = 0.35;
   scene.add(planet);
   const atm = new THREE.Sprite(new THREE.SpriteMaterial({ map: softTex, color: hdr(0.25, 0.55, 1.2), transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending }));
-  atm.position.copy(planet.position).add(V(0, 0, 40)); atm.scale.set(560, 560, 1); scene.add(atm);
+  atm.position.copy(planet.position).add(V(0, 0, 60)); atm.scale.set(840, 840, 1); scene.add(atm);
 }
 
 // ---------- materials ----------
@@ -171,9 +195,11 @@ const hullMat = new THREE.MeshStandardMaterial({ color: 0xc9d3e2, metalness: 0.5
 const accentMat = new THREE.MeshStandardMaterial({ color: 0x1d5cff, metalness: 0.4, roughness: 0.35, flatShading: true, side: THREE.DoubleSide });
 const darkMat = new THREE.MeshStandardMaterial({ color: 0x23262e, metalness: 0.6, roughness: 0.45, flatShading: true, side: THREE.DoubleSide });
 const glassMat = new THREE.MeshStandardMaterial({ color: 0x0b1a3a, metalness: 0.9, roughness: 0.08, emissive: 0x0a2a66, emissiveIntensity: 0.6 });
-const glowBlue = new THREE.MeshBasicMaterial({ color: hdr(0.6, 1.6, 4.5), toneMapped: false });
+const glowBlue = new THREE.MeshBasicMaterial({ color: hdr(0.4, 1.0, 2.6), toneMapped: false });
 const glowRed = new THREE.MeshBasicMaterial({ color: hdr(4.5, 0.5, 0.45), toneMapped: false });
+const glowOrange = new THREE.MeshBasicMaterial({ color: hdr(3.2, 1.3, 0.5), toneMapped: false });
 const enemyHull = new THREE.MeshStandardMaterial({ color: 0x5a5262, metalness: 0.75, roughness: 0.38, flatShading: true, side: THREE.DoubleSide });
+const motherHull = new THREE.MeshStandardMaterial({ map: panelTex, color: 0x8a8394, metalness: 0.55, roughness: 0.5, flatShading: true, side: THREE.DoubleSide });
 
 function extrudeShape(points, depth) {
   const sh = new THREE.Shape(points.map(p => new THREE.Vector2(p[0], p[1])));
@@ -192,8 +218,7 @@ const flames = [];
   const nose = new THREE.Mesh(new THREE.ConeGeometry(0.55, 3, 8).rotateX(Math.PI / 2), hullMat); nose.position.z = 4.5; fighter.add(nose);
   const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.55, 14, 10), glassMat); cockpit.scale.set(1, 0.75, 2.4); cockpit.position.set(0, 0.55, 1.6); fighter.add(cockpit);
   const wingGeo = extrudeShape([[0.6, 1.6], [5.6, -2.0], [5.8, -3.0], [0.6, -2.9]], 0.16).rotateX(Math.PI / 2);
-  const wR = new THREE.Mesh(wingGeo, hullMat); fighter.add(wR);
-  const wL = new THREE.Mesh(wingGeo.clone().scale(-1, 1, 1), hullMat); fighter.add(wL);
+  fighter.add(new THREE.Mesh(wingGeo, hullMat), new THREE.Mesh(wingGeo.clone().scale(-1, 1, 1), hullMat));
   const stripeGeo = extrudeShape([[1.0, 0.6], [5.0, -2.1], [5.15, -2.5], [1.0, -0.1]], 0.05).rotateX(Math.PI / 2).translate(0, 0.03, 0);
   fighter.add(new THREE.Mesh(stripeGeo, accentMat), new THREE.Mesh(stripeGeo.clone().scale(-1, 1, 1), accentMat));
   const finGeo = extrudeShape([[-3.2, 0], [-1.0, 0], [-2.7, 2.1], [-3.5, 2.1]], 0.12).rotateY(-Math.PI / 2);
@@ -212,74 +237,175 @@ const flames = [];
 }
 scene.add(fighter);
 
-// fighter path: speed eases from 40 to 18 u/s after the flyby; z(4.5) = 0
+// ---------- mothership: 3x scale, narrow nose toward -z, main engines at +z ----------
+const MS = 3, MC = V(0, 0, 700);                       // scale and world centre
+const hullR = lz => lerp(14, 34, (lz + 65) / 130);      // local hull radius along local z
+const mother = new THREE.Group();
+const motherLocal = []; // named local points
+{
+  const hull = new THREE.Mesh(new THREE.CylinderGeometry(14, 34, 130, 6, 4).rotateX(-Math.PI / 2), motherHull); hull.scale.y = 0.38; mother.add(hull);
+  const belly = new THREE.Mesh(new THREE.CylinderGeometry(10, 24, 110, 6).rotateX(-Math.PI / 2), darkMat); belly.scale.y = 0.3; belly.position.set(0, -6, 8); mother.add(belly);
+  // flat flight deck along the ridge
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(14, 4, 100), motherHull); deck.position.set(0, 11, 10); mother.add(deck);
+  // deck edge runway lights
+  const lightGeo = new THREE.BoxGeometry(0.5, 0.3, 1.2);
+  const lights = new THREE.InstancedMesh(lightGeo, glowOrange, 104); const m4 = new THREE.Matrix4(); let li = 0;
+  for (let z = -39; z <= 59; z += 3.8) for (const sx of [-1, 1]) { m4.makeTranslation(sx * 6.6, 13.2, z); lights.setMatrixAt(li++, m4); }
+  lights.count = li; mother.add(lights);
+  // bridge tower (off-centre so the deck run can slip past it)
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(9, 16, 16), motherHull); tower.position.set(12, 20, 34); mother.add(tower);
+  const towerTop = new THREE.Mesh(new THREE.BoxGeometry(12, 3, 9), darkMat); towerTop.position.set(12, 29.5, 33); mother.add(towerTop);
+  const bridge = new THREE.Mesh(new THREE.BoxGeometry(12.2, 0.8, 1), glowOrange); bridge.position.set(12, 29, 28.4); mother.add(bridge);
+  const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 10, 6), darkMat); antenna.position.set(14, 36, 34); mother.add(antenna);
+  // deck turrets
+  for (const [x, z] of [[-6, -30], [6, -12], [-6, 6], [6, 22], [-6, 48]]) {
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 2, 2, 8), darkMat); base.position.set(x, 14, z); mother.add(base);
+    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 4), darkMat); gun.position.set(x, 15.3, z - 1.5); gun.rotation.x = 0.5; mother.add(gun);
+    const tl = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 6), glowRed); tl.position.set(x, 15.4, z); mother.add(tl);
+    motherLocal.push(V(x, 15.5, z));
+  }
+  // side engine pods
+  for (const sx of [-1, 1]) {
+    const pod = new THREE.Mesh(new THREE.CylinderGeometry(6, 5, 50, 8).rotateX(-Math.PI / 2), darkMat); pod.position.set(sx * 34, -2, 30); mother.add(pod);
+    const pg = glowSprite(hdr(3, 0.6, 0.25), 20, 0.9); pg.position.set(sx * 34, -2, 57); mother.add(pg);
+  }
+  // main engines at the tail
+  for (const [x, y] of [[-12, 0], [12, 0], [0, 2]]) {
+    const ring = new THREE.Mesh(new THREE.CylinderGeometry(6, 7, 6, 12, 1, true).rotateX(-Math.PI / 2), darkMat); ring.position.set(x, y, 66); mother.add(ring);
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(5.6, 20), new THREE.MeshBasicMaterial({ color: hdr(3.5, 1.2, 0.6), toneMapped: false })); disc.position.set(x, y, 68.5); mother.add(disc);
+    const g = glowSprite(hdr(3, 1.1, 0.5), 26, 0.9); g.position.set(x, y, 71); mother.add(g);
+  }
+  // hull windows
+  const winGeo = new THREE.BoxGeometry(0.6, 0.3, 1.4);
+  const wins = new THREE.InstancedMesh(winGeo, glowOrange, 320);
+  for (let i = 0; i < 320; i++) {
+    const z = R(-58, 62), side = rand() < 0.5 ? -1 : 1, w = hullR(z) * 0.9;
+    m4.makeTranslation(side * w * R(0.55, 0.97), R(-4, 4.5), z); wins.setMatrixAt(i, m4);
+  }
+  mother.add(wins);
+  // greebles on the upper hull
+  const greb = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), darkMat, 450);
+  for (let i = 0; i < 450; i++) {
+    const z = R(-60, 62), r = hullR(z), th = R(-1.0, 1.0);
+    const x = Math.sin(th) * r * 0.86, y = 0.38 * Math.cos(th) * r * 0.97;
+    if (Math.abs(x) < 8 && z > -40 && z < 60) continue;            // keep the deck clear
+    const sx = R(0.6, 3), sy = R(0.4, 2), sz = R(0.8, 5);
+    m4.compose(V(x, y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, -th * 0.4)), V(sx, sy, sz)); greb.setMatrixAt(i, m4);
+  }
+  mother.add(greb);
+  const core = glowSprite(hdr(4, 0.4, 0.4), 22, 1); core.position.set(0, 0, -66); mother.add(core);
+}
+mother.scale.setScalar(MS); mother.position.copy(MC);
+scene.add(mother);
+const ML = v => v.clone().multiplyScalar(MS).add(MC);   // mothership local -> world
+const turretsW = motherLocal.map(ML);
+const ENGINE = ML(V(0, 2, 68));
+
+// ---------- fighter path ----------
+// t < DOG: straight run toward the escort fleet (speed eases from 40 to 18 u/s)
 const pathZ = []; {
-  const dt = 1 / 600; let z = -180; for (let i = 0; i <= DURATION * 600 + 10; i++) {
+  const dt = 1 / 600; let z = -180; for (let i = 0; i <= DOG * 600 + 10; i++) {
     pathZ.push(z); const t = i * dt; const v = lerp(40, 18, smooth(4.6, 5.8, t)); z += v * dt;
   }
 }
-function F(t) { const i = clamp(Math.floor(t * 600), 0, pathZ.length - 1); return V(3 * Math.sin(0.9 * t), 1.5 * Math.sin(0.7 * t), pathZ[i]); }
+// t >= DOG: Hermite spline through keyframes (with a vertical loop)
+const LC = V(0, 80, 830), LR = 30;                       // loop centre / radius
+const keys = [
+  [9.0, V(-75, 20, 410)], [10.0, V(-50, 32, 480)], [11.0, V(-22, 52, 548)], [11.8, V(-6, 50, 605)],
+  [12.6, V(6, 49, 660)], [13.4, V(-6, 49, 715)], [14.2, V(6, 50, 770)], [14.6, V(2, 50, 800)],
+];
+for (let k = 0; k <= 8; k++) { const ph = k / 8 * Math.PI * 2; keys.push([LOOP0 + k / 8 * (LOOP1 - LOOP0), V(0, LC.y - LR * Math.cos(ph), LC.z + LR * Math.sin(ph))]); }
+keys.push([18.0, V(0, 50, 875)], [18.6, V(2, 51, 920)], [19.1, V(25, 62, 975)], [19.6, V(80, 88, 1000)],
+  [FIRE, V(68, 74, 975)], [20.5, V(48, 58, 945)], [21.0, V(78, 70, 905)], [21.6, V(150, 95, 920)], [22.5, V(260, 120, 980)], [27.5, V(700, 240, 1200)]);
+const kT = keys.map(k => k[0]), kP = keys.map(k => k[1]);
+const kM = kP.map((p, i) => {
+  const a = Math.max(0, i - 1), b = Math.min(kP.length - 1, i + 1);
+  return kP[b].clone().sub(kP[a]).divideScalar(kT[b] - kT[a]);
+});
+// exact circular tangents on the loop keys
+keys.forEach(([t], i) => { if (t > LOOP0 - 1e-6 && t < LOOP1 + 1e-6) { const ph = (t - LOOP0) / (LOOP1 - LOOP0) * Math.PI * 2, w = 2 * Math.PI / (LOOP1 - LOOP0) * LR; kM[i] = V(0, w * Math.sin(ph), w * Math.cos(ph)); } });
+function Fd(t) {
+  if (t <= kT[0]) return kP[0].clone().addScaledVector(kM[0], t - kT[0]);
+  let i = 0; while (i < kT.length - 2 && t > kT[i + 1]) i++;
+  if (t >= kT[kT.length - 1]) return kP[kP.length - 1].clone();
+  const d = kT[i + 1] - kT[i], s = (t - kT[i]) / d, s2 = s * s, s3 = s2 * s;
+  return kP[i].clone().multiplyScalar(2 * s3 - 3 * s2 + 1).addScaledVector(kM[i], (s3 - 2 * s2 + s) * d)
+    .addScaledVector(kP[i + 1], -2 * s3 + 3 * s2).addScaledVector(kM[i + 1], (s3 - s2) * d);
+}
+function F(t) {
+  if (t >= DOG) return Fd(t);
+  const i = clamp(Math.floor(t * 600), 0, pathZ.length - 1);
+  return V(3 * Math.sin(0.9 * t), 1.5 * Math.sin(0.7 * t), pathZ[i]);
+}
+const seg = t => t < DOG ? 0 : 1;
+function heading(t) {
+  const h = 0.03;
+  return (seg(t + h) === seg(t) ? F(t + h).sub(F(t)) : F(t).sub(F(t - h))).normalize();
+}
 function setFighter(t) {
-  const p = F(t); fighter.position.copy(p);
-  const ahead = F(t + 0.05);
-  fighter.lookAt(ahead);
-  fighter.rotateZ(-0.45 * Math.cos(0.9 * t) + 0.04 * Math.sin(t * 7.3));
+  const p = F(t), d = heading(t); fighter.position.copy(p);
+  if (t >= LOOP0 && t <= LOOP1) fighter.up.copy(LC).sub(p).normalize();
+  else fighter.up.set(0, 1, 0);
+  fighter.lookAt(p.clone().add(d));
+  let roll;
+  if (t < DOG) roll = -0.45 * Math.cos(0.9 * t);
+  else if (t >= LOOP0 && t <= LOOP1) roll = 0;
+  else {   // bank into turns from lateral acceleration
+    const h = 0.06, a = F(t + h).add(F(t - h)).sub(p.clone().multiplyScalar(2)).divideScalar(h * h);
+    const right = new THREE.Vector3().crossVectors(d, V(0, 1, 0)).normalize();
+    roll = clamp(a.dot(right) * 0.012, -1.3, 1.3);
+  }
+  fighter.rotateZ(roll + 0.04 * Math.sin(t * 7.3));
   fighter.updateMatrixWorld(true);
   flames.forEach((f, k) => { const fl = 0.85 + 0.15 * Math.sin(t * 61 + k * 2.1) * Math.sin(t * 23 + k); f.scale.set(1, 1, fl); });
 }
 function fighterPoint(t, local) { setFighter(t); return fighter.localToWorld(local.clone()); }
 
-// ---------- enemies (nose = -z) ----------
-function makeEnemy() {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.OctahedronGeometry(2, 0), enemyHull); body.scale.set(1.5, 0.55, 2.3); g.add(body);
+// ---------- enemies (built nose = -z, then flipped so lookAt aims the nose) ----------
+function makeEnemy(scale) {
+  const g = new THREE.Group(), inner = new THREE.Group(); inner.rotation.y = Math.PI; g.add(inner);
+  const body = new THREE.Mesh(new THREE.OctahedronGeometry(2, 0), enemyHull); body.scale.set(1.5, 0.55, 2.3); inner.add(body);
   for (const sx of [-1, 1]) {
-    const prong = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 4.6), enemyHull); prong.position.set(sx * 2.1, 0, -1.6); prong.rotation.y = sx * 0.18; g.add(prong);
-    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), glowRed); tip.position.set(sx * 2.5, 0, -3.8); g.add(tip);
-    const blade = new THREE.Mesh(extrudeShape([[0, 0], [3.4, 0.6], [3.0, -0.6]], 0.1).rotateX(Math.PI / 2), darkMat); blade.scale.x = sx; blade.position.set(sx * 1.6, 0, 0.8); g.add(blade);
+    const prong = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 4.6), enemyHull); prong.position.set(sx * 2.1, 0, -1.6); prong.rotation.y = sx * 0.18; inner.add(prong);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), glowRed); tip.position.set(sx * 2.5, 0, -3.8); inner.add(tip);
+    const blade = new THREE.Mesh(extrudeShape([[0, 0], [3.4, 0.6], [3.0, -0.6]], 0.1).rotateX(Math.PI / 2), darkMat); blade.scale.x = sx; blade.position.set(sx * 1.6, 0, 0.8); inner.add(blade);
   }
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.55, 12, 8), glowRed); core.position.set(0, 0.35, -2.4); g.add(core);
-  const cg = glowSprite(hdr(3, 0.3, 0.3), 3.5, 0.9); cg.position.copy(core.position); g.add(cg);
-  const eg = glowSprite(hdr(2.5, 0.6, 0.3), 4, 0.8); eg.position.set(0, 0, 4.4); g.add(eg);
-  g.scale.setScalar(1.8);
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.55, 12, 8), glowRed); core.position.set(0, 0.35, -2.4); inner.add(core);
+  const cg = glowSprite(hdr(3, 0.3, 0.3), 3.5, 0.9); cg.position.copy(core.position); inner.add(cg);
+  const eg = glowSprite(hdr(2.5, 0.6, 0.3), 4, 0.8); eg.position.set(0, 0, 4.4); inner.add(eg);
+  g.scale.setScalar(scale);
+  scene.add(g);
   return g;
 }
+// escort fleet (shot B)
 const enemies = [];
 const deathTimes = [6.15, 6.6, 6.95, 7.3, 7.65, 8.0, 8.4];
 const killOrder = [3, 1, 5, 0, 6, 2, 4];
 for (let i = 0; i < 7; i++) {
-  const g = makeEnemy(); scene.add(g);
   const base = V((i - 3) * 13, 5 + Math.sin(i * 1.7) * 4, 200 + Math.abs(i - 3) * 12);
-  enemies.push({ g, base, die: deathTimes[killOrder.indexOf(i)], ph: R(0, 6.28) });
+  enemies.push({ g: makeEnemy(1.8), base, die: deathTimes[killOrder.indexOf(i)], ph: R(0, 6.28) });
 }
 function E(i, t) { const e = enemies[i]; return V(e.base.x + Math.sin(t * 0.8 + e.ph) * 2, e.base.y + Math.sin(t * 1.1 + e.ph) * 1.2, e.base.z - 10 * t); }
-
-// ---------- mothership ----------
-const mother = new THREE.Group();
-{
-  const hull = new THREE.Mesh(new THREE.CylinderGeometry(14, 34, 130, 6).rotateX(Math.PI / 2), enemyHull); hull.scale.y = 0.38; mother.add(hull);
-  const deck = new THREE.Mesh(new THREE.BoxGeometry(26, 8, 60), darkMat); deck.position.set(0, 8, 20); mother.add(deck);
-  const tower = new THREE.Mesh(new THREE.BoxGeometry(10, 14, 16), enemyHull); tower.position.set(0, 16, 34); mother.add(tower);
-  for (const sx of [-1, 1]) {
-    const pod = new THREE.Mesh(new THREE.CylinderGeometry(5, 6, 50, 8).rotateX(Math.PI / 2), darkMat); pod.position.set(sx * 34, -2, 30); mother.add(pod);
-    const pg = glowSprite(hdr(3, 0.5, 0.2), 22, 0.9); pg.position.set(sx * 34, -2, 57); mother.add(pg);
-  }
-  const winGeo = new THREE.BoxGeometry(1.4, 0.7, 3.2);
-  const wins = new THREE.InstancedMesh(winGeo, new THREE.MeshBasicMaterial({ color: hdr(3.2, 1.3, 0.5), toneMapped: false }), 420);
-  const m4 = new THREE.Matrix4();
-  for (let i = 0; i < 420; i++) {
-    const z = R(-55, 60), side = rand() < 0.5 ? -1 : 1, w = lerp(14, 34, (z + 65) / 130) * 0.92;
-    m4.makeTranslation(side * w * R(0.55, 0.98), R(-4, 4.5), z); wins.setMatrixAt(i, m4);
-  }
-  mother.add(wins);
-  const core = glowSprite(hdr(4, 0.4, 0.4), 30, 1); core.position.set(0, 0, -68); mother.add(core);
+// interceptors chasing the fighter during the dogfight: they trail the fighter's own path,
+// then overshoot straight ahead when it pulls into the loop
+const chasers = [
+  { lag: 0.55, off: V(5, 2.5, 0), die: 18.45, ph: 0.3 },
+  { lag: 0.9, off: V(-6, -1, 0), die: 18.1, ph: 2.1 },
+  { lag: 1.25, off: V(2, -3, 0), die: 17.75, ph: 4.0 },
+].map(c => ({ ...c, g: makeEnemy(1.4) }));
+const OVERSHOOT_V = V(0, 0.5, 74);
+function C(i, t) {
+  const c = chasers[i];
+  const wob = V(Math.sin(t * 2.1 + c.ph) * 1.5, Math.sin(t * 1.7 + c.ph) * 1.0, 0);
+  if (t <= LOOP0) return Fd(t - c.lag).add(c.off).add(wob);
+  const p = Fd(LOOP0 - c.lag).add(c.off), u = t - LOOP0;
+  return p.addScaledVector(OVERSHOOT_V, u).add(V(Math.sin(u * 1.3 + c.ph) * 3, Math.sin(u * 1.1) * 2, 0)).add(wob);
 }
-scene.add(mother);
-function M(t) { return V(0, 20, 430 - 5 * t); }
+function Cdir(i, t) { return C(i, t + 0.03).sub(C(i, t)).normalize(); }
 
 // ---------- explosions ----------
 const explosions = [];
-function makeExplosion(pos, t0, s) {
+function makeExplosion(pos, t0, s, kind = 'blast') {
   const N = Math.floor(90 + 70 * Math.sqrt(s)), S = 60 + Math.floor(20 * s);
   const fd = [], fs = [], fv = [], sd = [], ss = [];
   for (let i = 0; i < N; i++) { fd.push(randUnit()); fs.push(R(0.15, 1)); fv.push(R(0.6, 1.2)); }
@@ -296,17 +422,18 @@ function makeExplosion(pos, t0, s) {
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.965, 1, 96), new THREE.MeshBasicMaterial({ color: hdr(1.6, 1.0, 0.7), transparent: true, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
   ring.position.copy(pos); ring.lookAt(pos.clone().add(V(R(-0.4, 0.4), 1, R(-0.4, 0.4)))); ring.visible = false; scene.add(ring);
   const shards = [];
-  for (let i = 0; i < 6 + Math.floor(s * 2); i++) {
+  const nSh = kind === 'flak' ? 0 : 6 + Math.floor(Math.min(s, 8) * 2);
+  for (let i = 0; i < nSh; i++) {
     const m = new THREE.Mesh(new THREE.TetrahedronGeometry(R(0.25, 0.8) * Math.sqrt(s)), i % 3 ? enemyHull : darkMat);
     m.visible = false; scene.add(m); shards.push({ m, d: randUnit(), sp: R(4, 14), spin: randUnit().multiplyScalar(R(2, 8)) });
   }
-  const life = 2.6 + s * 0.35;
-  const ex = { pos, t0, s, life, light: 0 };
+  const life = kind === 'flak' ? 1.2 : 2.6 + s * 0.35;
+  const ex = { pos, t0, s, life, light: 0, kind, shards };
   ex.update = (t) => {
     const dt = t - t0, on = dt >= 0 && dt <= life;
-    fire.visible = sparks.visible = ring.visible = on; flash.visible = on && dt < 0.45;
+    fire.visible = sparks.visible = on; ring.visible = on && kind !== 'flak'; flash.visible = on && dt < 0.45;
     shards.forEach(o => o.m.visible = on && dt < life * 0.9);
-    ex.light = on ? 9000 * s * s * Math.exp(-dt * 3.2) : 0;
+    ex.light = on ? (kind === 'flak' ? 2500 : 9000 * s * s) * Math.exp(-dt * 3.2) : 0;
     if (!on) return;
     const k = 2.4, travel = (1 - Math.exp(-k * dt)) / k, fade = Math.pow(Math.max(0, 1 - dt / life), 1.6);
     const fp = fire.geometry.attributes.position.array, fc = fire.geometry.attributes.color.array;
@@ -330,14 +457,21 @@ function makeExplosion(pos, t0, s) {
     sparks.geometry.attributes.position.needsUpdate = sparks.geometry.attributes.color.needsUpdate = true;
     flash.position.copy(pos); const fsz = s * 13 * (0.5 + dt * 3); flash.scale.set(fsz, fsz, 1); flash.material.opacity = Math.max(0, 1 - dt / 0.45);
     const rs = s * (2 + 30 * travel); ring.scale.set(rs, rs, rs); ring.material.opacity = Math.pow(Math.max(0, 1 - dt / 0.8), 2) * 0.5;
-    shards.forEach(o => { o.m.position.copy(pos).addScaledVector(o.d, o.sp * dt * s * 0.9); o.m.rotation.set(o.spin.x * dt, o.spin.y * dt, o.spin.z * dt); });
+    shards.forEach(o => { o.m.position.copy(pos).addScaledVector(o.d, o.sp * dt * Math.sqrt(s) * 1.6); o.m.rotation.set(o.spin.x * dt, o.spin.y * dt, o.spin.z * dt); });
   };
   explosions.push(ex); return ex;
 }
 enemies.forEach((e, i) => makeExplosion(E(i, e.die), e.die, 1.6));
-const HIT = 10.3, FINAL = 11.15;
-const motherBlasts = [[HIT, V(0, 2, -60), 3.2], [10.55, V(-18, 6, -25), 2.2], [10.75, V(20, -2, -5), 2.6], [10.92, V(-8, 12, 25), 2.4], [FINAL, V(0, 4, 0), 9]];
-motherBlasts.forEach(([t, off, s]) => makeExplosion(M(t).add(off), t, s));
+chasers.forEach((c, i) => makeExplosion(C(i, c.die), c.die, 1.5));
+// flak bursting around the fighter during the deck run
+for (let t = 10.4; t < 14.9; t += R(0.25, 0.42)) {
+  const p = Fd(t + 0.15), off = randUnit().multiplyScalar(R(12, 26));
+  if (off.y < 0) off.y = -off.y * 0.5;
+  makeExplosion(p.add(off), t, 0.55, 'flak');
+}
+const motherBlasts = [[HIT, ENGINE.clone(), 4.5], [20.65, ML(V(-14, 8, 48)), 3.2], [20.85, ML(V(20, 2, 22)), 3.6], [21.05, ML(V(-10, 12, -2)), 3.4],
+  [21.25, ML(V(12, 6, -28)), 3.2], [21.4, ML(V(-4, 2, -55)), 3.6], [FINAL, ML(V(0, 4, 10)), 14]];
+motherBlasts.forEach(([t, p, s]) => makeExplosion(p, t, s));
 
 // ---------- lasers ----------
 const lasers = [];
@@ -349,46 +483,76 @@ function addLaser(t0, p0, v, life, len, type) {
   lasers.push({ t0, p0, v, life, len, type, m });
 }
 const wingL = V(-5.2, -0.1, -0.8), wingR = V(5.2, -0.1, -0.8);
-// kill shots (3 per enemy, arriving at death time)
-enemies.forEach((e, i) => {
+function killShots(targetFn, die) {
   for (let k = 0; k < 3; k++) {
-    const arrive = e.die - (2 - k) * 0.08, local = k % 2 ? wingL : wingR, target = E(i, arrive);
+    const arrive = die - (2 - k) * 0.08, local = k % 2 ? wingL : wingR, target = targetFn(arrive);
     let t0 = arrive - 0.4;
     for (let it = 0; it < 4; it++) t0 = arrive - fighterPoint(t0, local).distanceTo(target) / 380;
     const p0 = fighterPoint(t0, local), life = arrive - t0;
     addLaser(t0, p0, target.clone().sub(p0).divideScalar(life), life, 7, 'blue');
   }
-});
-// suppressive fire (misses)
-for (let t = 5.0, k = 0; t < 8.5; t += 0.16, k++) {
-  const alive = enemies.map((e, i) => i).filter(i => enemies[i].die > t + 0.4);
-  if (!alive.length) break;
-  const i = alive[Math.floor(rand() * alive.length)], p0 = fighterPoint(t, k % 2 ? wingL : wingR);
-  const target = E(i, t + 0.4).add(V(R(-9, 9), R(-6, 6), 0));
-  addLaser(t, p0, target.sub(p0).normalize().multiplyScalar(380), 1.1, 7, 'blue');
 }
-// enemy fire
+function missShots(t0, t1, step, pickTarget) {
+  for (let t = t0, k = 0; t < t1; t += step, k++) {
+    const target = pickTarget(t); if (!target) continue;
+    const p0 = fighterPoint(t, k % 2 ? wingL : wingR);
+    addLaser(t, p0, target.sub(p0).normalize().multiplyScalar(380), 1.1, 7, 'blue');
+  }
+}
+// shot B: fleet
+enemies.forEach((e, i) => killShots(t => E(i, t), e.die));
+missShots(5.0, 8.5, 0.16, t => {
+  const alive = enemies.map((e, i) => i).filter(i => enemies[i].die > t + 0.4);
+  return alive.length ? E(alive[Math.floor(rand() * alive.length)], t + 0.4).add(V(R(-9, 9), R(-6, 6), 0)) : null;
+});
 enemies.forEach((e, i) => {
   for (let t = 5.0 + R(0, 0.3); t < e.die - 0.1; t += R(0.38, 0.62)) {
-    const p0 = E(i, t).add(V(0, 0.6, -5));
-    const target = F(t + 0.55).add(V(R(-5, 5) || 3, R(-3.5, 3.5), 0));
-    if (Math.abs(target.x - F(t + 0.55).x) < 2) target.x += 3;
+    const p0 = E(i, t).add(V(0, 0.6, -5)), aim = F(t + 0.55);
+    const target = aim.clone().add(V((rand() < 0.5 ? -1 : 1) * R(3, 6), R(-3.5, 3.5), 0));
     addLaser(t, p0, target.sub(p0).normalize().multiplyScalar(240), 1.8, 6, 'red');
   }
 });
-// charged shot at the mothership
+// dogfight: chasers shoot at the fighter from behind, turrets fire up from the deck
+chasers.forEach((c, i) => {
+  for (let t = 9.6 + R(0, 0.3); t < LOOP0 + 0.2; t += R(0.28, 0.45)) {
+    const p0 = C(i, t).addScaledVector(Cdir(i, t), 4), aim = Fd(t + 0.25);
+    const target = aim.clone().add(V((rand() < 0.5 ? -1 : 1) * R(2.5, 5), R(-2.5, 3), 0));
+    addLaser(t, p0, target.sub(p0).normalize().multiplyScalar(300), 1.4, 6, 'red');
+  }
+});
+for (let t = 10.6; t < 15.0; t += R(0.18, 0.3)) {
+  const p0 = turretsW[Math.floor(rand() * turretsW.length)];
+  const target = Fd(t + 0.3).add(V(R(-10, 10), R(4, 14), R(-6, 10)));
+  addLaser(t, p0.clone(), target.sub(p0).normalize().multiplyScalar(260), 1.2, 5, 'red');
+}
+// reversal: the fighter is now behind the chasers
+chasers.forEach((c, i) => killShots(t => C(i, t), c.die));
+missShots(17.45, 18.4, 0.14, t => {
+  const alive = chasers.map((c, i) => i).filter(i => chasers[i].die > t + 0.3);
+  return alive.length ? C(alive[Math.floor(rand() * alive.length)], t + 0.3).add(V(R(-6, 6), R(-4, 4), 0)) : null;
+});
+
+// charged shot into the main engines
 const charge = glowSprite(hdr(1.2, 2.6, 6), 1, 1); charge.visible = false; scene.add(charge);
 const orb = glowSprite(hdr(1.5, 3, 7), 6, 1); orb.visible = false; scene.add(orb);
 const orbTrail = new THREE.Mesh(laserGeo, laserBlue); orbTrail.visible = false; scene.add(orbTrail);
-const FIRE = 9.45;
-const nose = V(0, 0, 6.5);
-function orbPos(t) { const a = fighterPoint(FIRE, nose), b = M(HIT).add(V(0, 2, -60)); return a.lerp(b, clamp((t - FIRE) / (HIT - FIRE), 0, 1)); }
+const noseTip = V(0, 0, 6.5);
+const FIRE_FROM = fighterPoint(FIRE, noseTip);
+function orbPos(t) { return FIRE_FROM.clone().lerp(ENGINE, clamp((t - FIRE) / (HIT - FIRE), 0, 1)); }
 
 // ---------- post ----------
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(W, H), 0.85, 0.55, 0.82);
-composer.addPass(bloom);
+// clamp HDR values (point lights right next to fresh debris can overflow half-float to Inf -> NaN in bloom)
+composer.addPass(new ShaderPass({
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; varying vec2 vUv;
+    void main(){ vec4 c = texture2D(tDiffuse, vUv);
+      c.rgb = vec3(c.r == c.r ? c.r : 0.0, c.g == c.g ? c.g : 0.0, c.b == c.b ? c.b : 0.0);
+      gl_FragColor = vec4(clamp(c.rgb, 0.0, 60.0), 1.0); }`
+}));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(W, H), 0.85, 0.55, 0.82));
 composer.addPass(new OutputPass());
 const grade = new ShaderPass({
   uniforms: { tDiffuse: { value: null }, seed: { value: 0 }, ca: { value: 0.0015 } },
@@ -410,69 +574,102 @@ composer.addPass(grade);
 const el = id => document.getElementById(id);
 function shake(t) {
   let a = 0;
-  for (const ex of explosions) { const dt = t - ex.t0; if (dt > 0 && dt < 1.5) a += ex.s * 0.07 * Math.exp(-dt * 4.5); }
+  for (const ex of explosions) {
+    const dt = t - ex.t0; if (dt <= 0 || dt > 1.5) continue;
+    const near = clamp(60 / Math.max(20, camera.position.distanceTo(ex.pos)), 0.25, 1.5);
+    a += (ex.kind === 'flak' ? 0.25 : ex.s * 0.07) * near * Math.exp(-dt * 4.5);
+  }
   a = Math.min(a, 1.4);
   return V(Math.sin(t * 53.1) * Math.sin(t * 17.3), Math.sin(t * 47.7 + 1) * Math.sin(t * 13.1), 0).multiplyScalar(a);
 }
+function chaseCam(t, back, up, side, ahead) {
+  const p = F(t), d = heading(t), right = new THREE.Vector3().crossVectors(d, V(0, 1, 0)).normalize();
+  return [p.clone().addScaledVector(d, -back).add(V(0, up, 0)).addScaledVector(right, side), p.clone().addScaledVector(d, ahead)];
+}
 function shotCamera(t) {
-  if (t < 4.0) {                       // A: fighter bursts out of the nebula and flies past
+  if (t < 4.0) {                         // A: fighter bursts out of the nebula and flies past
     const pos = V(6 - 0.25 * t, 1.6 + 0.15 * t, -4);
-    const look = V(0, 0, -200).lerp(F(t).add(V(0, 0, 8)), smooth(1.2, 4.3, t));
-    return [pos, look, 48];
-  } else if (t < 9.0) {                // B: chase cam into the dogfight
+    return [pos, V(0, 0, -200).lerp(F(t).add(V(0, 0, 8)), smooth(1.2, 4.3, t)), 48];
+  }
+  if (t < DOG) {                         // B: chase cam into the escort fleet (mothership looms behind)
     const p = F(t);
     return [p.clone().add(V(2.5 * Math.sin(t * 0.6), 3.4, -14)), p.clone().add(V(0, 1.2, 30)), 52];
-  } else if (t < 12.0) {               // C: low side angle, mothership in frame
-    const p = F(t), u = smooth(9.0, 12.0, t);
-    return [p.clone().add(V(-10 + 2 * u, -2.6, -11 + 2 * u)), p.clone().add(V(0, 0, 25)).lerp(M(t).add(V(0, 0, -30)), 0.6), 46];
-  } else {                             // D: aftermath + title
-    const c = M(FINAL), u = t - 12;
-    return [c.clone().add(V(70 - 4 * u, 18 - u, -150 + 6 * u)), c.clone().add(V(0, 6, 0)), 44];
   }
+  if (t < 11.0) {                        // D1: wide reveal of the giant mothership, fighter + chasers streak in
+    const u = smooth(DOG, 11.0, t);
+    return [V(-165 + 30 * u, -40 + 12 * u, 395 + 30 * u), MC.clone().add(V(0, 10, -60)).lerp(F(t), 0.5 + 0.2 * u), 56];
+  }
+  if (t < 13.4) {                        // D2: low and in front, looking back: deck run with chasers behind
+    const p = F(t);
+    return [p.clone().add(V(4, 5, 24)), p.clone().add(V(0, 0.5, -22)), 50];
+  }
+  if (t < LOOP0) {                       // D3: side-on at deck level, tower and turrets whipping past
+    const p = F(t);
+    return [p.clone().add(V(-15, -2.5, 4)), p.clone().add(V(0, 0, 12)), 54];
+  }
+  if (t < LOOP1) {                       // D4: profile of the loop, chasers overshoot underneath
+    const u = smooth(LOOP0, LOOP1, t);
+    return [V(-115 + 15 * u, 88, 835), V(0, 74, lerp(840, 875, u)), 46];
+  }
+  if (t < CSHOT) {                       // D5: chase cam, the fighter is behind the interceptors now
+    return [...chaseCam(t, 20, 6.5, 3, 45), 50];
+  }
+  if (t < 20.6) {                        // C1: over the shoulder as it dives on the main engines
+    return [...chaseCam(t, 20, 6, 5, 45), 50];
+  }
+  if (t < 22.0) {                        // C2: fighter escapes toward camera while the mothership blows apart
+    return [V(175, 108, 965), V(0, 15, 760).lerp(F(t), 0.25 + 0.35 * smooth(20.6, 21.6, t)), 50];
+  }
+  const u = t - 22;                      // T: aftermath + title
+  return [MC.clone().add(V(300 - 8 * u, 70 - 2 * u, -560 + 10 * u)), MC.clone().add(V(0, 15, 0)), 44];
 }
 
 window.renderAt = (t) => {
-  setFighter(t);
-  enemies.forEach((e, i) => { e.g.visible = t < e.die + 0.04; e.g.position.copy(E(i, t)); e.g.lookAt(F(t)); e.g.rotateZ(Math.sin(t * 0.9 + e.ph) * 0.25); });
-  mother.position.copy(M(t)); mother.visible = t < FINAL + 0.06; mother.rotation.z = Math.sin(t * 0.3) * 0.03;
+  enemies.forEach((e, i) => { e.g.visible = t < e.die + 0.04; if (!e.g.visible) return; e.g.position.copy(E(i, t)); e.g.lookAt(F(t)); e.g.rotateZ(Math.sin(t * 0.9 + e.ph) * 0.25); });
+  chasers.forEach((c, i) => {
+    c.g.visible = t > DOG - 0.5 && t < c.die + 0.04; if (!c.g.visible) return;
+    const p = C(i, t); c.g.position.copy(p); c.g.lookAt(p.clone().add(Cdir(i, t))); c.g.rotateZ(Math.sin(t * 1.9 + c.ph) * 0.5);
+  });
+  mother.visible = t < FINAL + 0.06;
   for (const l of lasers) {
     const dt = t - l.t0; l.m.visible = dt >= 0 && dt <= l.life; if (!l.m.visible) continue;
     l.m.position.copy(l.p0).addScaledVector(l.v, dt); l.m.lookAt(l.m.position.clone().add(l.v)); l.m.scale.set(1, 1, l.len);
   }
-  // charge + orb
-  charge.visible = t > 9.0 && t < FIRE + 0.05;
-  if (charge.visible) { charge.position.copy(fighterPoint(t, nose)); const s = 0.5 + 5 * smooth(9.0, FIRE, t) + 0.6 * Math.sin(t * 90); charge.scale.set(s, s, 1); }
+  charge.visible = t > CHARGE && t < FIRE + 0.05;
+  if (charge.visible) { charge.position.copy(fighterPoint(t, noseTip)); const s = 0.5 + 5 * smooth(CHARGE, FIRE, t) + 0.6 * Math.sin(t * 90); charge.scale.set(s, s, 1); }
   orb.visible = orbTrail.visible = t >= FIRE && t < HIT;
   if (orb.visible) {
-    const p = orbPos(t), back = orbPos(t - 0.12); orb.position.copy(p); orb.scale.setScalar(7 + Math.sin(t * 70)); orb.scale.z = 1;
-    orbTrail.position.copy(p).add(back).multiplyScalar(0.5); orbTrail.lookAt(p); orbTrail.scale.set(6, 6, p.distanceTo(back));
+    const p = orbPos(t), back = orbPos(t - 0.12); orb.position.copy(p); orb.scale.set(7 + Math.sin(t * 70), 7 + Math.sin(t * 70), 1);
+    orbTrail.position.copy(p).add(back).multiplyScalar(0.5); orbTrail.lookAt(p); orbTrail.scale.set(6, 6, Math.max(0.01, p.distanceTo(back)));
   }
   setFighter(t);
+
+  const [pos, look, fov] = shotCamera(t);
+  camera.position.copy(pos); camera.fov = fov; camera.updateProjectionMatrix();
   explosions.forEach(ex => ex.update(t));
+  camera.position.add(shake(t)); camera.lookAt(look);
+  // never let a debris shard cover the lens
+  explosions.forEach(ex => ex.shards.forEach(o => { if (o.m.visible && o.m.position.distanceTo(camera.position) < 10) o.m.visible = false; }));
   explosions.filter(ex => ex.light > 0).sort((a, b) => b.light - a.light).slice(0, 4).concat([null, null, null, null]).slice(0, 4)
     .forEach((ex, k) => { lightPool[k].intensity = ex ? ex.light : 0; if (ex) lightPool[k].position.copy(ex.pos); });
 
-  const [pos, look, fov] = shotCamera(t);
-  camera.position.copy(pos).add(shake(t)); camera.fov = fov; camera.updateProjectionMatrix(); camera.lookAt(look);
-
   // overlays
-  const white = smooth(11.05, 11.3, t) * (1 - smooth(11.5, 12.2, t));
-  el('white').style.opacity = white;
-  const black = Math.max(1 - smooth(0, 0.8, t), smooth(12.0, 13.0, t) * 0.45, smooth(15.2, 16.0, t), (t > 11.8 && t < 12.0) ? 0 : 0);
-  el('black').style.opacity = black;
-  const ti = smooth(12.4, 13.4, t);
-  el('title').style.opacity = ti * (1 - smooth(15.2, 15.9, t));
-  el('title').querySelector('h1').style.letterSpacing = lerp(0.55, 0.2, smooth(12.4, 13.9, t)) + 'em';
-  el('title').querySelector('.line').style.width = (smooth(13.0, 14.0, t) * 620) + 'px';
-  el('title').querySelector('p').style.opacity = smooth(13.6, 14.4, t);
+  el('white').style.opacity = smooth(21.45, 21.7, t) * (1 - smooth(21.95, 22.7, t));
+  el('black').style.opacity = Math.max(1 - smooth(0, 0.8, t), smooth(22.2, 23.2, t) * 0.45, smooth(26.2, 27.0, t));
+  el('title').style.opacity = smooth(TITLE, TITLE + 1, t) * (1 - smooth(26.2, 26.9, t));
+  el('title').querySelector('h1').style.letterSpacing = lerp(0.36, 0.2, smooth(TITLE, TITLE + 1.5, t)) + 'em';
+  el('title').querySelector('.line').style.width = (smooth(TITLE + 0.6, TITLE + 1.6, t) * 620) + 'px';
+  el('title').querySelector('p').style.opacity = smooth(TITLE + 1.2, TITLE + 2.0, t);
   grade.uniforms.seed.value = (t * 30) % 97;
   composer.render();
 };
 window.DURATION = DURATION;
 window.getEvents = () => ({
+  duration: DURATION,
   lasers: lasers.map(l => ({ t: +l.t0.toFixed(3), type: l.type })),
-  explosions: explosions.map(e => ({ t: +e.t0.toFixed(3), s: e.s })),
-  charge: 9.0, fire: FIRE, flyby: 3.9, title: 12.4
+  explosions: explosions.map(e => ({ t: +e.t0.toFixed(3), s: e.s, kind: e.kind })),
+  whooshes: [3.9, 10.6, 15.5, 21.4],
+  drums: [4.0, HIT], charge: CHARGE, fire: FIRE, hit: HIT, whiteout: 21.5, title: TITLE
 });
 window.renderAt(0);
 window.ready = true;
