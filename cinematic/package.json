@@ -1,0 +1,12 @@
+{
+  "name": "nebula-strike-cinematic",
+  "private": true,
+  "description": "Procedural CG intro cinematic for Nebula Strike (Three.js + Playwright + ffmpeg)",
+  "scripts": {
+    "render": "node render.js",
+    "audio": "python3 audio.py"
+  },
+  "dependencies": {
+    "three": "0.170.0"
+  }
+}
