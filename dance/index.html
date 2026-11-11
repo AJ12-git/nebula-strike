@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dance Girl</title>
+<style>
+  @font-face { font-family: "Patrick Hand"; src: url("./node_modules/@fontsource/patrick-hand/files/patrick-hand-latin-400-normal.woff2") format("woff2"); }
+  html, body { margin: 0; background: #000; overflow: hidden; }
+  #wrap { width: 1280px; height: 720px; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1280" height="720"></canvas></div>
+<script type="module">
+import rough from './node_modules/roughjs/bundled/rough.esm.js';
+
+const W = 1280, H = 720, BPM = 120, BEAT = 60 / BPM, DURATION = 25.5, BOIL_FPS = 12;
+const INK = '#2b2118', FLOOR_Y = 672, CX = 640, S = 1.72;      // S = character scale on screen
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), rc = rough.canvas(cv);
+
+// ---------------- helpers ----------------
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const ss = u => u * u * (3 - 2 * u);
+const seg = (a, b, t) => clamp((t - a) / (b - a), 0, 1);
+const smooth = (a, b, t) => ss(seg(a, b, t));
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+let boil = 0, sc = 0;
+const O = (o = {}) => ({ seed: boil * 997 + (++sc) * 13 + 1, roughness: 1.0, bowing: 1.1, stroke: INK, strokeWidth: 2.2, ...o });
+let FILL_OFF = [2, -1.5];
+function washPath(path, color, alpha = 0.95) { ctx.save(); ctx.translate(FILL_OFF[0], FILL_OFF[1]); ctx.globalAlpha *= alpha; ctx.fillStyle = color; ctx.fill(path); ctx.restore(); }
+function ellipsePath(cx, cy, w, h, rot = 0) { const p = new Path2D(); p.ellipse(cx, cy, Math.abs(w) / 2, Math.abs(h) / 2, rot, 0, Math.PI * 2); return p; }
+function E(cx, cy, w, h, fill, o = {}) { if (fill) washPath(ellipsePath(cx, cy, w, h), fill, o.alpha ?? 0.95); if (o.stroke !== 'none') rc.ellipse(cx, cy, w, h, O(o)); }
+function P(d, fill, o = {}) { if (fill) washPath(new Path2D(d), fill, o.alpha ?? 0.95); if (o.stroke !== 'none') rc.path(d, O(o)); }
+function Ln(x1, y1, x2, y2, o = {}) { rc.line(x1, y1, x2, y2, O(o)); }
+function Cv(pts, o = {}) { rc.curve(pts, O(o)); }
+const poly = pts => 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L') + ' Z';
+function ribbon(pts, w0, w1) {
+  const n = pts.length, L = [], R = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+    let dx = b[0] - a[0], dy = b[1] - a[1]; const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+    const w = lerp(w0, w1, i / (n - 1)) / 2;
+    L.push([pts[i][0] - dy * w, pts[i][1] + dx * w]); R.push([pts[i][0] + dy * w, pts[i][1] - dx * w]);
+  }
+  return poly(L.concat(R.reverse()));
+}
+const dir = a => [Math.sin(a), Math.cos(a)];          // angle measured from straight down, + toward screen right
+const add2 = (p, v, k = 1) => [p[0] + v[0] * k, p[1] + v[1] * k];
+
+// ---------------- choreography (pose-to-pose keys on the beat grid) ----------------
+// pose: p = pelvis [x,y] (y up is negative, floor = 0), fl/fr = feet [x,y], sp = spine tilt, hd = head tilt,
+// la/ra = [upper, fore] absolute arm angles (0 = hanging down, + toward screen right),
+// spin = turns, face/mouth/hl/hr = expression & hand shapes (stepped, not interpolated)
+const BASE = { p: [0, -124], fl: [-20, 0], fr: [20, 0], sp: 0, hd: 0, la: [-0.18, -0.08], ra: [0.18, 0.08], spin: 0, face: 'open', mouth: 'smile', hl: 'fist', hr: 'fist', sq: 1 };
+const keys = [];
+const K = (beat, o) => keys.push({ t: beat * BEAT, ...JSON.parse(JSON.stringify({ ...BASE, ...o })) });
+const HIP_L = [-0.62, 0.95], HIP_R = [0.62, -0.95], CLAP_L = [-2.95, -3.72], CLAP_R = [2.95, 3.72];
+
+// intro (beats 0-7): sway, knee bounce, finger snaps on 2 & 4
+K(0, {});
+for (let b = 0; b < 8; b++) {
+  const s = b % 2 ? 1 : -1, snap = b % 2 === 1;
+  K(b + 0.0, { p: [s * 10, -116], sp: -s * 0.06, hd: s * 0.12, la: snap && b % 4 === 3 ? [-1.25, -2.7] : [-0.25, -0.1], ra: snap && b % 4 === 1 ? [1.25, 2.7] : [0.25, 0.1], hl: snap && b % 4 === 3 ? 'snap' : 'fist', hr: snap && b % 4 === 1 ? 'snap' : 'fist', mouth: snap ? 'open' : 'smile' });
+  K(b + 0.5, { p: [s * 6, -125], sp: -s * 0.03, hd: s * 0.06, la: [-0.2, -0.1], ra: [0.2, 0.1] });
+}
+// step-touch with arm swings (beats 8-15)
+for (let r = 0; r < 2; r++) {
+  const b = 8 + r * 4;
+  K(b + 0, { p: [40, -116], fr: [72, 0], fl: [8, 0], sp: -0.06, hd: 0.1, la: [0.9, 1.5], ra: [1.45, 1.8], mouth: 'open' });
+  K(b + 1, { p: [46, -125], fr: [72, 0], fl: [42, -10], sp: -0.04, hd: 0.14, la: [0.7, 1.2], ra: [1.3, 1.5], face: 'happy' });
+  K(b + 2, { p: [-40, -116], fl: [-72, 0], fr: [-8, 0], sp: 0.06, hd: -0.1, la: [-1.45, -1.8], ra: [-0.9, -1.5], mouth: 'open' });
+  K(b + 3, { p: [-46, -125], fl: [-72, 0], fr: [-42, -10], sp: 0.04, hd: -0.14, la: [-1.3, -1.5], ra: [-0.7, -1.2], face: 'happy' });
+}
+// arm wave overhead + disco point (beats 16-23)
+const WIDE = { fl: [-36, 0], fr: [36, 0] };
+K(16, { ...WIDE, p: [0, -118], la: [-2.7, -2.85], ra: [2.7, 2.85], hl: 'open', hr: 'open', mouth: 'open' });
+K(17, { ...WIDE, p: [-14, -122], sp: 0.12, hd: -0.18, la: [-2.05, -1.7], ra: [2.9, 3.6], hl: 'open', hr: 'open' });
+K(18, { ...WIDE, p: [14, -122], sp: -0.12, hd: 0.18, la: [-2.9, -3.6], ra: [2.05, 1.7], hl: 'open', hr: 'open' });
+K(19, { ...WIDE, p: [0, -112], la: [-2.6, -2.75], ra: [2.6, 2.75], hl: 'open', hr: 'open', face: 'happy', mouth: 'open' });
+for (let r = 0; r < 2; r++) {
+  const b = 20 + r * 2;
+  K(b, { p: [12, -118], fl: [-26, 0], fr: [40, 0], sp: -0.08, hd: 0.16, la: HIP_L, ra: [2.35, 2.45], hr: 'point', mouth: 'open' });
+  K(b + 1, { p: [-2, -124], fl: [-26, 0], fr: [40, 0], sp: 0.07, hd: -0.08, la: HIP_L, ra: [-0.45, -0.75], hr: 'point', face: r ? 'wink' : 'open' });
+}
+// spin (beats 24-27)
+K(24, { p: [0, -108], fl: [-18, 0], fr: [18, 0], la: [-0.3, 0.9], ra: [0.3, -0.9], mouth: 'smile' });
+K(24.5, { p: [0, -132], fl: [-8, 0], fr: [9, -3], la: [-1.2, -0.6], ra: [2.75, 3.0], hl: 'open', hr: 'open', face: 'happy' });
+K(26.5, { p: [0, -132], fl: [-8, 0], fr: [9, -3], la: [-1.2, -0.6], ra: [2.75, 3.0], hl: 'open', hr: 'open', face: 'happy', spin: 1 });
+K(27, { p: [0, -114], fl: [-34, 0], fr: [34, 0], la: [-1.6, -1.75], ra: [1.6, 1.75], hl: 'open', hr: 'open', spin: 1, mouth: 'open' });
+// jumps (beats 28-35)
+const jump = (b, kind) => {
+  K(b, { p: [0, -102], fl: [-24, 0], fr: [24, 0], sp: 0.05, la: [0.35, 0.6], ra: [-0.35, -0.6], spin: 1, sq: 0.94 });
+  if (kind === 'star') K(b + 0.6, { p: [0, -205], fl: [-62, -78], fr: [62, -78], la: [-2.3, -2.4], ra: [2.3, 2.4], hl: 'open', hr: 'open', spin: 1, mouth: 'open', face: 'happy', sq: 1.04 });
+  else K(b + 0.6, { p: [0, -200], fl: [-16, -96], fr: [16, -96], la: [-2.6, -2.7], ra: [2.6, 2.7], hl: 'fist', hr: 'fist', spin: 1, mouth: 'open', face: 'happy', sq: 1.04 });
+  K(b + 1.15, { p: [0, -104], fl: [-28, 0], fr: [28, 0], la: [-1.3, -1.5], ra: [1.3, 1.5], hl: 'open', hr: 'open', spin: 1, sq: 0.93 });
+  K(b + 1.6, { p: [0, -124], fl: [-28, 0], fr: [28, 0], la: [-0.8, -1.0], ra: [0.8, 1.0], spin: 1 });
+};
+jump(28, 'star'); jump(30, 'star'); jump(32, 'tuck'); jump(34, 'star');
+// grapevine with overhead claps on 2 & 4 (beats 36-43)
+const OPEN_L = [-0.9, -1.1], OPEN_R = [0.9, 1.1];
+const vine = (b, dirn, x0) => {
+  const d = dirn;
+  K(b, { p: [x0 + d * 30, -118], fl: d > 0 ? [x0 - 10, 0] : [x0 - 60, 0], fr: d > 0 ? [x0 + 60, 0] : [x0 + 10, 0], la: OPEN_L, ra: OPEN_R, spin: 1, hl: 'open', hr: 'open' });
+  K(b + 0.5, { p: [x0 + d * 55, -122], fl: d > 0 ? [x0 + 75, -2] : [x0 - 60, 0], fr: d > 0 ? [x0 + 60, 0] : [x0 - 75, -2], la: OPEN_L, ra: OPEN_R, spin: 1, hl: 'open', hr: 'open' });
+  K(b + 1, { p: [x0 + d * 85, -116], fl: d > 0 ? [x0 + 75, 0] : [x0 + d * 120 + 10, 0], fr: d > 0 ? [x0 + d * 120 - 10, 0] : [x0 - 75, 0], la: CLAP_L, ra: CLAP_R, spin: 1, hl: 'clap', hr: 'clap', mouth: 'open', face: 'happy' });
+  K(b + 1.5, { p: [x0 + d * 95, -124], fl: d > 0 ? [x0 + 100, -10] : [x0 + d * 120 + 10, 0], fr: d > 0 ? [x0 + d * 120 - 10, 0] : [x0 - 100, -10], la: [-2.4, -2.6], ra: [2.4, 2.6], spin: 1, hl: 'open', hr: 'open' });
+};
+vine(36, 1, 0); vine(38, -1, 110); vine(40, -1, 0); vine(42, 1, -110);
+// finale (beats 44-51)
+K(44, { p: [-8, -120], fl: [-32, 0], fr: [26, 0], sp: 0.1, hd: -0.16, la: HIP_L, ra: [3.0, 3.1], hr: 'point', spin: 1, face: 'wink', mouth: 'open' });
+K(51, { p: [-8, -121], fl: [-32, 0], fr: [26, 0], sp: 0.1, hd: -0.16, la: HIP_L, ra: [3.0, 3.1], hr: 'point', spin: 1, face: 'wink', mouth: 'open' });
+keys.sort((a, b) => a.t - b.t);
+
+const NUM = ['sp', 'hd', 'spin', 'sq'], VEC = ['p', 'fl', 'fr', 'la', 'ra'], STEP = ['face', 'mouth', 'hl', 'hr'];
+function poseAt(t) {
+  let i = 0; while (i < keys.length - 2 && t >= keys[i + 1].t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const u = b.t > a.t ? clamp((t - a.t) / (b.t - a.t), 0, 1) : 1, e = ss(u);
+  const o = {};
+  for (const k of NUM) o[k] = lerp(a[k], b[k], e);
+  for (const k of VEC) o[k] = a[k].map((v, j) => lerp(v, b[k][j], e));
+  for (const k of STEP) o[k] = u < 0.5 ? a[k] : b[k];
+  // lift a foot when it travels between keys
+  for (const f of ['fl', 'fr']) { const d = Math.hypot(b[f][0] - a[f][0], b[f][1] - a[f][1]); if (d > 20) o[f][1] -= Math.min(26, d * 0.3) * Math.sin(Math.PI * u); }
+  // idle breathing
+  o.p[1] += Math.sin(t * 2.4) * 0.8;
+  return o;
+}
+
+// ---------------- secondary motion: ponytail + skirt (simulated forward in time) ----------------
+const TAIL_N = 7, TAIL_L = 17;
+let sim = null;
+function headInfo(po) {
+  const s = po.sp, chest = add2(po.p, [Math.sin(s) * 72, -Math.cos(s) * 72]);
+  const neck = add2(chest, [Math.sin(s) * 8, -Math.cos(s) * 8]);
+  const ha = s + po.hd, head = add2(neck, [Math.sin(ha) * 38, -Math.cos(ha) * 38]);
+  const anchor = add2(head, [Math.cos(ha) * 30 + Math.sin(ha) * 34, Math.sin(ha) * 30 - Math.cos(ha) * 34]);
+  return { chest, neck, head, ha, anchor };
+}
+function stepSim(t) {
+  if (!sim || t < sim.t - 1e-6) {
+    const a = headInfo(poseAt(0)).anchor;
+    sim = { t: 0, pts: Array.from({ length: TAIL_N }, (_, i) => [a[0] + i * 4, a[1] + i * TAIL_L]), prev: null, flare: 0, flareV: 0, sway: 0, swayV: 0, lastP: poseAt(0).p.slice(), lastSpin: 0 };
+    sim.prev = sim.pts.map(p => p.slice());
+  }
+  const dt = 1 / 240;
+  while (sim.t + dt <= t + 1e-9) {
+    sim.t += dt;
+    const po = poseAt(sim.t), hi = headInfo(po);
+    const vx = (po.p[0] - sim.lastP[0]) / dt, vy = (po.p[1] - sim.lastP[1]) / dt, spinV = (po.spin - sim.lastSpin) / dt;
+    sim.lastP = po.p.slice(); sim.lastSpin = po.spin;
+    // ponytail: verlet chain pinned to the scrunchie
+    const cos = Math.cos(po.spin * Math.PI * 2);
+    const fling = spinV * 2600 * (cos >= 0 ? 1 : -1);
+    for (let i = 1; i < TAIL_N; i++) {
+      const p = sim.pts[i], q = sim.prev[i];
+      const nx = p[0] + (p[0] - q[0]) * 0.985 + (fling + 60) * dt * dt, ny = p[1] + (p[1] - q[1]) * 0.985 + 1400 * dt * dt;
+      q[0] = p[0]; q[1] = p[1]; p[0] = nx; p[1] = ny;
+    }
+    sim.pts[0] = hi.anchor.slice(); sim.prev[0] = hi.anchor.slice();
+    for (let it = 0; it < 4; it++) for (let i = 1; i < TAIL_N; i++) {
+      const a = sim.pts[i - 1], b = sim.pts[i]; let dx = b[0] - a[0], dy = b[1] - a[1]; const d = Math.hypot(dx, dy) || 1;
+      const k = (d - TAIL_L) / d; b[0] -= dx * k; b[1] -= dy * k;
+    }
+    // skirt: spring toward a flare driven by spin + vertical motion, sway lags behind hip motion
+    const target = Math.min(70, Math.abs(spinV) * 34 + Math.abs(vy) * 0.08 + Math.abs(vx) * 0.04);
+    sim.flareV += ((target - sim.flare) * 160 - sim.flareV * 14) * dt; sim.flare += sim.flareV * dt;
+    sim.swayV += ((-vx * 0.04 - sim.sway) * 120 - sim.swayV * 10) * dt; sim.sway += sim.swayV * dt;
+  }
+  return sim;
+}
+
+// ---------------- the girl ----------------
+const C = { skin: '#f7d3b6', skinD: '#e9b597', hair: '#5a3424', hairL: '#7a4a32', shirt: '#ffd34f', shirtD: '#e9b62c', skirt: '#3cb8a8', skirtD: '#2a8f83', sock: '#ffffff', shoe: '#e5483f', blush: '#f49aa3', scr: '#e5483f' };
+function legIK(hip, foot, side) {
+  const a = 63, b = 62; let dx = foot[0] - hip[0], dy = foot[1] - hip[1]; let d = Math.hypot(dx, dy);
+  const dd = clamp(d, 8, a + b - 0.5);
+  const th = Math.atan2(dy, dx), al = Math.acos(clamp((a * a + dd * dd - b * b) / (2 * a * dd), -1, 1));
+  const k1 = [hip[0] + Math.cos(th + al) * a, hip[1] + Math.sin(th + al) * a], k2 = [hip[0] + Math.cos(th - al) * a, hip[1] + Math.sin(th - al) * a];
+  const knee = side * (k1[0] - k2[0]) > 0 ? k1 : k2;      // knees bend outward
+  const f = d > a + b - 0.5 ? [hip[0] + dx / d * (a + b - 0.5), hip[1] + dy / d * (a + b - 0.5)] : foot;
+  return [knee, f];
+}
+function hand(h, shape, side, t) {
+  if (shape === 'open' || shape === 'clap') {
+    for (let k = -2; k <= 2; k++) { const a = k * 0.35 + (side < 0 ? -0.3 : 0.3); Ln(h[0], h[1], h[0] + Math.sin(a) * 12 * side, h[1] - Math.cos(a) * 12, { strokeWidth: 3.2, stroke: C.skinD }); }
+    E(h[0], h[1], 15, 15, C.skin, { strokeWidth: 1.8 });
+  } else if (shape === 'point') {
+    E(h[0], h[1], 14, 14, C.skin, { strokeWidth: 1.8 });
+  } else E(h[0], h[1], 14, 14, C.skin, { strokeWidth: 1.8 });
+}
+function drawGirl(po, sm, t) {
+  const cos = Math.cos(po.spin * Math.PI * 2), front = cos >= 0;
+  ctx.save();
+  ctx.translate(CX + po.p[0] * S, FLOOR_Y); ctx.scale(S * (Math.abs(cos) < 0.1 ? Math.sign(cos || 1) * 0.1 : cos), S * po.sq); ctx.translate(-po.p[0], 0);
+  FILL_OFF = [1.5, -1.2];
+  const hi = headInfo(po), s = po.sp, perp = [Math.cos(s), Math.sin(s)];
+  const hipL = add2(po.p, perp, -15), hipR = add2(po.p, perp, 15);
+  const shL = add2(hi.chest, perp, -30), shR = add2(hi.chest, perp, 30);
+  // arms (FK)
+  const arm = (sh, ang) => { const el = add2(sh, dir(ang[0]).map(v => v * 1), 1); const e2 = [sh[0] + Math.sin(ang[0]) * 54, sh[1] + Math.cos(ang[0]) * 54]; const h = [e2[0] + Math.sin(ang[1]) * 50, e2[1] + Math.cos(ang[1]) * 50]; return [e2, h]; };
+  const [elL, hL] = arm(shL, po.la), [elR, hR] = arm(shR, po.ra);
+  const [knL, ftL] = legIK(hipL, po.fl, -1), [knR, ftR] = legIK(hipR, po.fr, 1);
+  const drawTail = () => {
+    const pts = sm.pts.map(p => [p[0], p[1]]);
+    P(ribbon(pts, 30, 10), C.hair); for (let i = 1; i < pts.length - 1; i += 2) Cv([pts[i], [pts[i + 1][0] + 3, pts[i + 1][1]]], { strokeWidth: 1.2, stroke: C.hairL });
+    E(pts[0][0], pts[0][1], 20, 17, C.scr, { strokeWidth: 1.8 });
+  };
+  if (front) drawTail();
+  // legs
+  for (const [hip, kn, ft, side] of [[hipL, knL, ftL, -1], [hipR, knR, ftR, 1]]) {
+    P(ribbon([hip, kn, ft], 20, 15), C.skin);
+    const sockTop = [lerp(kn[0], ft[0], 0.55), lerp(kn[1], ft[1], 0.55)];
+    P(ribbon([sockTop, ft], 16, 15), C.sock, { strokeWidth: 1.8 });
+    E(ft[0] + side * 9, ft[1] - 5, 34, 16, C.shoe); Ln(ft[0] + side * 2, ft[1] + 2, ft[0] + side * 22, ft[1] + 1, { strokeWidth: 3, stroke: '#ffffff' });
+  }
+  // skirt
+  const waist = add2(po.p, [Math.sin(s) * 12, -Math.cos(s) * 12]);
+  const fl = 34 + sm.flare * 0.9, sw = sm.sway, hemY = waist[1] + 50 - sm.flare * 0.25;
+  const skirt = poly([add2(waist, perp, -24), add2(waist, perp, 24), [waist[0] + fl + sw, hemY], [waist[0] - fl + sw, hemY]]);
+  P(skirt, C.skirt);
+  for (let k = -2; k <= 2; k++) Ln(waist[0] + k * 8, waist[1] + 2, waist[0] + sw + k * fl / 2.6, hemY - 2, { strokeWidth: 1.4, stroke: C.skirtD });
+  // torso
+  const torso = poly([shL, shR, add2(waist, perp, 22), add2(waist, perp, -22)]);
+  P(torso, front ? C.shirt : C.shirtD);
+  if (front) { P(`M ${hi.chest[0] - 8} ${hi.chest[1] + 30} l 6 -8 l 6 8 l -6 6 z`, C.scr, { strokeWidth: 1.4 }); }
+  // arms raised over the head are drawn behind it
+  const behind = (h) => h[1] < hi.head[1] - 12 && Math.abs(h[0] - hi.head[0]) < 48;
+  const bL = behind(hL), bR = behind(hR);
+  if (bL) drawArm(shL, elL, hL, po.hl, -1); if (bR) drawArm(shR, elR, hR, po.hr, 1);
+  // neck + head
+  P(ribbon([hi.chest, hi.neck], 14, 14), C.skin, { strokeWidth: 1.6 });
+  const [hx, hy] = hi.head;
+  ctx.save(); ctx.translate(hx, hy); ctx.rotate(hi.ha);
+  E(0, -6, 92, 90, C.hair);                                   // back hair
+  if (front) {
+    E(0, 4, 78, 76, C.skin);
+    E(-41, 4, 12, 18, C.skin, { strokeWidth: 1.6 }); E(41, 4, 12, 18, C.skin, { strokeWidth: 1.6 });
+    P('M -42 -6 Q -40 -44 0 -46 Q 40 -44 42 -6 Q 30 -26 14 -24 Q 6 -14 -4 -26 Q -20 -14 -30 -24 Q -38 -16 -42 -6 Z', C.hair); // bangs
+    Cv([[-20, -36], [-10, -28]], { strokeWidth: 1.2, stroke: C.hairL }); Cv([[12, -38], [20, -30]], { strokeWidth: 1.2, stroke: C.hairL });
+    E(-24, 16, 14, 8, C.blush, { stroke: 'none', alpha: 0.6 }); E(24, 16, 14, 8, C.blush, { stroke: 'none', alpha: 0.6 });
+    const blink = (t % 3.7) < 0.12 && po.face === 'open';
+    const eyeD = (x, kind) => {
+      if (kind === 'happy' || blink) { Cv([[x - 8, 6], [x, -2], [x + 8, 6]], { strokeWidth: 2.6 }); return; }
+      E(x, 2, 15, 20, INK, { stroke: 'none', alpha: 1 }); E(x - 3, -3, 6, 6, '#ffffff', { stroke: 'none', alpha: 1 }); E(x + 3, 6, 3, 3, '#ffffff', { stroke: 'none', alpha: 1 });
+      Ln(x - 9, -9, x - 5, -6, { strokeWidth: 1.6 });
+    };
+    eyeD(-15, po.face === 'happy' ? 'happy' : 'open');
+    eyeD(15, po.face === 'wink' || po.face === 'happy' ? 'happy' : 'open');
+    if (po.mouth === 'open') P('M -9 20 Q 0 34 9 20 Z', '#c8434a', { strokeWidth: 1.8 });
+    else Cv([[-8, 21], [0, 26], [8, 21]], { strokeWidth: 1.8 });
+  } else {
+    E(0, 2, 84, 82, C.hair);
+    Cv([[-20, -30], [-10, 10]], { strokeWidth: 1.2, stroke: C.hairL }); Cv([[14, -30], [18, 14]], { strokeWidth: 1.2, stroke: C.hairL });
+  }
+  ctx.restore();
+  if (!front) drawTail();
+  // arms on top
+  function drawArm(sh, el, h, shape, side) {
+    P(ribbon([sh, el, h], 15, 12), C.skin);
+    E(sh[0] + side * 2, sh[1] + 8, 26, 24, front ? C.shirt : C.shirtD, { strokeWidth: 1.8 });   // puff sleeve
+    hand(h, shape, side, t);
+    if (shape === 'point') { const d = [h[0] - el[0], h[1] - el[1]], n = Math.hypot(...d); Ln(h[0], h[1], h[0] + d[0] / n * 16, h[1] + d[1] / n * 16, { strokeWidth: 4, stroke: C.skinD }); }
+  }
+  if (!bL) drawArm(shL, elL, hL, po.hl, -1); if (!bR) drawArm(shR, elR, hR, po.hr, 1);
+  ctx.restore();
+  // hand positions in screen space (for effects)
+  const toScreen = p => [CX + po.p[0] * S + (p[0] - po.p[0]) * S * cos, FLOOR_Y + p[1] * S * po.sq];
+  return { hL: toScreen(hL), hR: toScreen(hR), head: toScreen(hi.head), feet: [toScreen(ftL), toScreen(ftR)] };
+}
+
+// ---------------- stage ----------------
+const bg = document.createElement('canvas'); bg.width = W; bg.height = H;
+const bulbs = [];
+{
+  const g = bg.getContext('2d'), brc = rough.canvas(bg), r = mulberry32(9);
+  const BO = (o = {}) => ({ seed: Math.floor(r() * 1e6), roughness: 1.2, bowing: 1.2, stroke: INK, strokeWidth: 2, ...o });
+  const wash = (path, color, a = 1) => { g.save(); g.globalAlpha = a; g.fillStyle = color; g.fill(path); g.restore(); };
+  // back wall
+  const grd = g.createLinearGradient(0, 0, 0, 520); grd.addColorStop(0, '#5b4a9e'); grd.addColorStop(1, '#a776c4');
+  g.fillStyle = grd; g.fillRect(0, 0, W, 530);
+  for (let i = 0; i < 160; i++) { g.globalAlpha = 0.05; g.fillStyle = r() < 0.5 ? '#3d2f7a' : '#d6a3e0'; g.beginPath(); g.arc(r() * W, r() * 520, 30 + r() * 90, 0, 7); g.fill(); }
+  g.globalAlpha = 1;
+  // big painted stars / circles on the backdrop
+  for (let i = 0; i < 26; i++) { const x = r() * W, y = 40 + r() * 400, s = 4 + r() * 8; g.fillStyle = 'rgba(255,240,200,0.55)'; g.beginPath(); for (let k = 0; k < 10; k++) { const rr = k % 2 ? s * 0.45 : s; g.lineTo(x + Math.cos(k * 0.628 - 1.57) * rr, y + Math.sin(k * 0.628 - 1.57) * rr); } g.fill(); }
+  // floor
+  const fgrd = g.createLinearGradient(0, 520, 0, H); fgrd.addColorStop(0, '#b97a4b'); fgrd.addColorStop(1, '#d89a62');
+  g.fillStyle = fgrd; g.fillRect(0, 520, W, H - 520);
+  brc.line(0, 528, W, 528, BO({ strokeWidth: 3 }));
+  for (let k = -12; k <= 12; k++) brc.line(CX + k * 60, 528, CX + k * 150, H + 10, BO({ strokeWidth: 1.2, stroke: '#8a5530' }));
+  for (const y of [560, 605, 660]) brc.line(0, y, W, y, BO({ strokeWidth: 1, stroke: '#9a6438' }));
+  // curtains
+  for (const sx of [-1, 1]) {
+    const x0 = sx < 0 ? -20 : W + 20, x1 = sx < 0 ? 170 : W - 170;
+    const cur = `M ${x0} -10 L ${x1} -10 Q ${x1 - sx * 60} 260 ${x1 - sx * 10} ${H + 10} L ${x0} ${H + 10} Z`;
+    wash(new Path2D(cur), '#c8343a'); brc.path(cur, BO({ stroke: 'none', fill: '#8e1f25', fillStyle: 'hachure', hachureGap: 14, hachureAngle: 82, fillWeight: 1.2 })); brc.path(cur, BO());
+    for (let k = 1; k < 4; k++) brc.line(lerp(x0, x1, k / 4), -10, lerp(x0, x1 - sx * 10, k / 4) - sx * 20, H, BO({ strokeWidth: 1.4, stroke: '#7a1a20' }));
+  }
+  const val = `M -10 -10 L ${W + 10} -10 L ${W + 10} 60 Q ${W * 0.75} 95 ${W / 2} 62 Q ${W * 0.25} 95 -10 60 Z`;
+  wash(new Path2D(val), '#a8262c'); brc.path(val, BO());
+  // bunting
+  const cols = ['#ffd34f', '#3cb8a8', '#f49aa3', '#7fb2ff', '#ff8a3d'];
+  for (const [y0, sag] of [[95, 50], [125, 40]]) {
+    const pts = []; for (let i = 0; i <= 20; i++) { const u = i / 20; pts.push([170 + u * (W - 340), y0 + Math.sin(u * Math.PI) * sag]); }
+    brc.curve(pts, BO({ strokeWidth: 1.6 }));
+    if (y0 === 95) for (let i = 0; i < 20; i++) { const a = pts[i], b = pts[i + 1], m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + 30]; wash(new Path2D(poly([a, b, m])), cols[i % 5]); brc.path(poly([a, b, m]), BO({ strokeWidth: 1.4 })); }
+    else for (let i = 1; i < 20; i += 1) bulbs.push([pts[i][0], pts[i][1] + 8, i]);
+  }
+}
+
+// ---------------- effects ----------------
+function star(x, y, s, color = '#ffe46b') { const pts = []; for (let k = 0; k < 10; k++) { const r = k % 2 ? s * 0.42 : s; pts.push([x + Math.cos(k * 0.628 - 1.57) * r, y + Math.sin(k * 0.628 - 1.57) * r]); } P(poly(pts), color, { strokeWidth: 1.6 }); }
+function note(x, y, s, rot) { ctx.save(); ctx.translate(x, y); ctx.rotate(rot); E(0, 0, 14 * s, 10 * s, INK, { stroke: 'none', alpha: 1 }); Ln(6 * s, -2 * s, 6 * s, -30 * s, { strokeWidth: 2.4 }); Cv([[6 * s, -30 * s], [14 * s, -24 * s], [16 * s, -14 * s]], { strokeWidth: 2.4 }); ctx.restore(); }
+function snapFx(x, y, age) { if (age < 0 || age > 0.35) return; const u = age / 0.35; ctx.save(); ctx.globalAlpha = 1 - u; for (let k = 0; k < 5; k++) { const a = k * 1.256 - 1.57; Ln(x + Math.cos(a) * (12 + u * 10), y + Math.sin(a) * (12 + u * 10), x + Math.cos(a) * (22 + u * 22), y + Math.sin(a) * (22 + u * 22), { strokeWidth: 2.4, stroke: '#fff3a0' }); } ctx.restore(); }
+
+// paper texture
+const paper = document.createElement('canvas'); paper.width = W; paper.height = H;
+{
+  const g = paper.getContext('2d'), id = g.createImageData(W, H), r = mulberry32(3);
+  for (let i = 0; i < W * H; i++) { const v = 236 + r() * 19; id.data[i * 4] = v; id.data[i * 4 + 1] = v - 3; id.data[i * 4 + 2] = v - 10; id.data[i * 4 + 3] = 255; }
+  g.putImageData(id, 0, 0);
+  const vg = g.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H); vg.addColorStop(0, 'rgba(255,255,255,0)'); vg.addColorStop(1, 'rgba(90,60,40,0.6)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+}
+
+// beat events (for effects + audio)
+const SNAPS = [1, 3, 5, 7].map(b => b * BEAT);
+const CLAPS = [37, 39, 41, 43].map(b => b * BEAT);
+const LANDS = [29.15, 31.15, 33.15, 35.15].map(b => b * BEAT);
+
+window.renderAt = (t) => {
+  boil = Math.floor(t * BOIL_FPS); sc = 0;
+  const po = poseAt(t), sm = stepSim(t);
+  const beatPh = (t / BEAT) % 1, pulse = Math.exp(-beatPh * 6), drop = t >= 14 && t < 22;
+  const zoom = 1 + smooth(22, 24, t) * 0.12 + (drop ? pulse * 0.012 : 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.translate(W / 2, H * 0.62); ctx.scale(zoom, zoom); ctx.translate(-W / 2, -H * 0.62);
+  ctx.drawImage(bg, 0, 0);
+  // bulbs blink on the beat
+  for (const [x, y, i] of bulbs) {
+    const on = (Math.floor(t / BEAT) + i) % 3 === 0 || drop && (Math.floor(t / BEAT * 2) + i) % 2 === 0;
+    ctx.save(); if (on) { ctx.globalAlpha = 0.35; ctx.fillStyle = '#fff6b0'; ctx.beginPath(); ctx.arc(x, y, 16, 0, 7); ctx.fill(); }
+    ctx.restore(); E(x, y, 11, 13, on ? '#fff3a0' : '#8a7aa0', { strokeWidth: 1.4 });
+  }
+  // spotlight cone and pool
+  ctx.save(); ctx.globalCompositeOperation = 'screen';
+  const sx = CX + po.p[0] * S * 0.8;
+  const cone = ctx.createLinearGradient(0, 0, 0, FLOOR_Y); cone.addColorStop(0, 'rgba(255,240,200,0.0)'); cone.addColorStop(1, `rgba(255,240,200,${0.22 + pulse * (drop ? 0.08 : 0.02)})`);
+  ctx.fillStyle = cone; ctx.beginPath(); ctx.moveTo(sx - 40, 0); ctx.lineTo(sx + 40, 0); ctx.lineTo(sx + 240, FLOOR_Y + 20); ctx.lineTo(sx - 240, FLOOR_Y + 20); ctx.fill();
+  ctx.fillStyle = 'rgba(255,240,200,0.35)'; ctx.beginPath(); ctx.ellipse(sx, FLOOR_Y + 4, 250, 46, 0, 0, 7); ctx.fill();
+  ctx.restore();
+  // shadow shrinks when she is in the air
+  const air = clamp((-po.p[1] - 124) / 80, 0, 1);
+  ctx.save(); ctx.globalAlpha = 0.28 * (1 - air * 0.5); ctx.fillStyle = '#3a2010'; ctx.beginPath(); ctx.ellipse(CX + po.p[0] * S, FLOOR_Y + 4, 110 * (1 - air * 0.35), 18, 0, 0, 7); ctx.fill(); ctx.restore();
+  // floating music notes
+  for (let k = 0; k < 6; k++) { const a = ((t * 0.18 + k / 6) % 1); ctx.save(); ctx.globalAlpha = Math.sin(a * Math.PI) * 0.8; note(220 + k * 170 + Math.sin(t + k) * 20, 470 - a * 330, 1, Math.sin(t * 2 + k) * 0.3); ctx.restore(); }
+  const pts = drawGirl(po, sm, t);
+  // effects
+  for (const ts of SNAPS) { const h = ts === SNAPS[0] || ts === SNAPS[2] ? pts.hR : pts.hL; snapFx(h[0], h[1], t - ts); }
+  for (const tc of CLAPS) { const age = t - tc; if (age >= 0 && age < 0.4) { const m = [(pts.hL[0] + pts.hR[0]) / 2, (pts.hL[1] + pts.hR[1]) / 2]; snapFx(m[0], m[1] - 10, age); if (age < 0.25) star(m[0] + 30, m[1] - 30, 10); } }
+  for (const tl of LANDS) { const age = t - tl; if (age >= 0 && age < 0.4) { ctx.save(); ctx.globalAlpha = 1 - age / 0.4; for (const f of pts.feet) for (const d of [-1, 1]) Ln(f[0] + d * 20, f[1], f[0] + d * (40 + age * 80), f[1] - 6, { strokeWidth: 2 }); ctx.restore(); } }
+  if (t > 12.25 && t < 13.5) { ctx.save(); ctx.globalAlpha = 0.6; for (let k = 0; k < 3; k++) { const y = pts.head[1] + 140 + k * 40; Cv([[CX + po.p[0] * S - 90, y], [CX + po.p[0] * S, y + 14], [CX + po.p[0] * S + 90, y]], { strokeWidth: 2, stroke: '#fff3c0' }); } ctx.restore(); }
+  // confetti finale
+  if (t > 22) {
+    const r = mulberry32(77), cols = ['#ffd34f', '#3cb8a8', '#f49aa3', '#7fb2ff', '#ff8a3d', '#ffffff'];
+    for (let i = 0; i < 90; i++) {
+      const t0 = 22 + r() * 1.2, x0 = r() * W, sp = 120 + r() * 140, wob = r() * 6, c = cols[i % 6]; const age = t - t0; if (age < 0) continue;
+      const x = x0 + Math.sin(age * 3 + wob) * 30, y = -20 + age * sp; if (y > H + 20) continue;
+      ctx.save(); ctx.translate(x, y); ctx.rotate(age * 4 + wob); ctx.fillStyle = c; ctx.fillRect(-6, -3 * Math.abs(Math.cos(age * 6 + wob)), 12, 6 * Math.abs(Math.cos(age * 6 + wob)) + 1); ctx.restore();
+    }
+    for (let k = 0; k < 4; k++) { const a = t * 1.5 + k * 1.57; star(pts.head[0] + Math.cos(a) * 150, pts.head[1] - 40 + Math.sin(a) * 50, 9 + 3 * Math.sin(t * 6 + k)); }
+  }
+  // paper + fades
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = 0.5; ctx.drawImage(paper, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  const black = Math.max(1 - smooth(0, 0.6, t), smooth(24.6, 25.5, t));
+  if (black > 0) { ctx.fillStyle = `rgba(0,0,0,${black})`; ctx.fillRect(0, 0, W, H); }
+};
+window.DURATION = DURATION;
+window.getEvents = () => ({ duration: DURATION, bpm: BPM, snaps: SNAPS, claps: CLAPS, lands: LANDS });
+await document.fonts.load('40px "Patrick Hand"');
+window.renderAt(0);
+window.ready = true;
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "dance-girl",
+  "private": true,
+  "description": "Hand-drawn dancing girl with a jointed rig (Rough.js + Playwright + ffmpeg)",
+  "dependencies": {
+    "roughjs": "4.6.6",
+    "@fontsource/patrick-hand": "5.0.8"
+  }
+}
